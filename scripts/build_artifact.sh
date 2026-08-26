@@ -11,12 +11,22 @@
 #
 # Outputs to dist/:
 #   harness-kernel-<ver>-<target>.tar.gz   bin/ lib/ include/ share/
-#   release-manifest.json                   version, commit, compiler, ABI, sha256
+#   release-manifest-<target>.json          version, commit, compiler, ABI, sha256
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VERSION="${1:?usage: build_artifact.sh <version>}"
-TARGET="${TARGET:-$(uname -m)-$(uname -s | tr '[:upper:]' '[:lower:]')-gnu}"
+# Must match install.sh's TARGET computation exactly (see the comment there) —
+# any drift here is a manifest/tarball 404 on install.
+if [ -z "${TARGET:-}" ]; then
+  ARCH="$(uname -m)"
+  case "$(uname -s)" in
+    Linux)  OS_TAG=linux-gnu ;;
+    Darwin) OS_TAG=apple-darwin ;;
+    *)      OS_TAG="$(uname -s | tr '[:upper:]' '[:lower:]')" ;;
+  esac
+  TARGET="${ARCH}-${OS_TAG}"
+fi
 OUT=dist
 BUILD=build-release
 rm -rf "$OUT" "$BUILD" && mkdir -p "$OUT"
@@ -78,7 +88,8 @@ tar -C "$OUT" -czf "$TARBALL" "harness-kernel-$VERSION"
 rm -rf "$STAGE"
 
 SHA=$(sha256sum "$TARBALL" | cut -d' ' -f1)
-cat > "$OUT/release-manifest.json" <<JSON
+MANIFEST="$OUT/release-manifest-$TARGET.json"
+cat > "$MANIFEST" <<JSON
 {
   "version": "$VERSION",
   "commit": "$COMMIT",
@@ -91,4 +102,4 @@ cat > "$OUT/release-manifest.json" <<JSON
   }
 }
 JSON
-cat "$OUT/release-manifest.json"
+cat "$MANIFEST"

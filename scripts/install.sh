@@ -36,8 +36,12 @@ need tar
 # baked into the tarball and manifest filenames, so any drift here is a
 # download 404, not a subtle bug.
 ARCH="$(uname -m)"
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-TARGET="${ARCH}-${OS}-gnu"
+case "$(uname -s)" in
+  Linux)  OS_TAG=linux-gnu ;;
+  Darwin) OS_TAG=apple-darwin ;;
+  *)      OS_TAG="$(uname -s | tr '[:upper:]' '[:lower:]')" ;;
+esac
+TARGET="${ARCH}-${OS_TAG}"
 
 echo "== target: $TARGET"
 
