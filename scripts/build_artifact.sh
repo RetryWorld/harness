@@ -51,6 +51,7 @@ GEN=""; command -v ninja >/dev/null 2>&1 && GEN="-G Ninja"
 cmake -S . -B "$BUILD" $GEN \
   -DCMAKE_BUILD_TYPE=Release \
   -DHARNESS_BUILD_COMMIT="$COMMIT" \
+  -DHARNESS_RELEASE_VERSION="$VERSION" \
   -DCMAKE_INSTALL_PREFIX="$PWD/$STAGE"
 cmake --build "$BUILD" --parallel
 
