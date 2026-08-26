@@ -1,0 +1,66 @@
+name: release
+
+# One workflow builds every platform the curl installer supports, from the
+# same tag, so a Linux user and a macOS user both get a tarball produced by
+# scripts/build_artifact.sh (same tests, same sanitizer pass, same manifest
+# format) rather than a Linux-only artifact hand-built by whoever has a
+# toolchain handy.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+          - os: macos-latest
+            name: macos-arm64
+          - os: macos-13
+            name: macos-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja
+
+      - name: Isolation check
+        run: ./scripts/isolation_check.sh
+
+      - name: Build, test, package
+        run: ./scripts/build_artifact.sh "${GITHUB_REF_NAME#v}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
