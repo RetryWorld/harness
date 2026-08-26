@@ -80,6 +80,7 @@ target_compile_definitions(harness_core PRIVATE
 # dlopen, a customer's runtime via ordinary FFI.
 add_library(harness_kernel SHARED $<TARGET_OBJECTS:harness_core>)
 target_include_directories(harness_kernel PUBLIC include)
+target_link_libraries(harness_kernel PRIVATE harness_flags)
 set_target_properties(harness_kernel PROPERTIES
   OUTPUT_NAME harness_kernel
   VERSION ${PROJECT_VERSION}
