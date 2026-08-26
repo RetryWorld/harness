@@ -59,7 +59,7 @@ rm -rf "$BUILD-san"
 echo "== abi check"
 # The header and the library must agree. A header change without an ABI bump is
 # how a consumer silently misreads the envelope.
-HDR_ABI=$(grep -oP '#define HARNESS_ABI_VERSION \K[0-9]+' include/harness_kernel.h)
+HDR_ABI=$(sed -n -E 's/#define HARNESS_ABI_VERSION ([0-9]+)/\1/p' include/harness_kernel.h)
 LIB_ABI=$("$BUILD/harness-kernel" --abi)
 if [ "$HDR_ABI" != "$LIB_ABI" ]; then
   echo "ERROR: header ABI $HDR_ABI != library ABI $LIB_ABI" >&2
