@@ -40,13 +40,20 @@ cmake -S "$TMP/edge" -B "$TMP/build" $GEN -DCMAKE_BUILD_TYPE=Release > /dev/null
 cmake --build "$TMP/build" --parallel > /dev/null
 (cd "$TMP/build" && ctest --output-on-failure)
 
-echo "== exported symbol surface"
-# Only the extern "C" ABI may be exported. A leaked C++ symbol is a mangled name
-# that ties consumers to our compiler and standard library.
-LEAKED=$(nm -D --defined-only "$TMP/build/libharness_kernel.so" \
-  | awk '$2 ~ /[TDB]/ {print $3}' | grep -v '^harness_' | grep -v '^_' || true)
-if [ -n "$LEAKED" ]; then
-  echo "FAIL: non-C-ABI symbols exported:" >&2; echo "$LEAKED" >&2; exit 1
+if [ "$(uname -s)" = "Linux" ]; then
+  echo "== exported symbol surface"
+  # Only the extern "C" ABI may be exported. A leaked C++ symbol is a mangled name
+  # that ties consumers to our compiler and standard library. GNU nm's -D only
+  # exists on Linux; the release target is Linux (see install.sh's TARGET), so
+  # this check is skipped on other build hosts rather than faked with a
+  # different tool's incompatible output.
+  LEAKED=$(nm -D --defined-only "$TMP/build/libharness_kernel.so" \
+    | awk '$2 ~ /[TDB]/ {print $3}' | grep -v '^harness_' | grep -v '^_' || true)
+  if [ -n "$LEAKED" ]; then
+    echo "FAIL: non-C-ABI symbols exported:" >&2; echo "$LEAKED" >&2; exit 1
+  fi
+else
+  echo "== exported symbol surface (skipped: Linux-only check, running on $(uname -s))"
 fi
 
 echo "PASS: edge/ builds standalone with zero dependencies."

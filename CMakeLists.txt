@@ -26,6 +26,12 @@ endif()
 
 set(HARNESS_BUILD_COMMIT "unknown" CACHE STRING "Commit or source hash recorded in the binary")
 
+# The release version (the git tag build_artifact.sh was invoked with) is the
+# version a customer actually installs and the one --version must report.
+# PROJECT_VERSION only tracks what's checked into this file, which drifts from
+# the tag the moment nobody remembers to bump it here too.
+set(HARNESS_RELEASE_VERSION "${PROJECT_VERSION}" CACHE STRING "Release version recorded in the binary")
+
 # ---------------------------------------------------------------------------
 # Compile options.
 #
@@ -72,7 +78,7 @@ add_library(harness_core OBJECT
 target_include_directories(harness_core PUBLIC include PRIVATE src)
 target_link_libraries(harness_core PRIVATE harness_flags)
 target_compile_definitions(harness_core PRIVATE
-  HARNESS_VERSION_STRING="${PROJECT_VERSION}"
+  HARNESS_VERSION_STRING="${HARNESS_RELEASE_VERSION}"
   HARNESS_BUILD_COMMIT_STRING="${HARNESS_BUILD_COMMIT}"
 )
 
@@ -80,6 +86,7 @@ target_compile_definitions(harness_core PRIVATE
 # dlopen, a customer's runtime via ordinary FFI.
 add_library(harness_kernel SHARED $<TARGET_OBJECTS:harness_core>)
 target_include_directories(harness_kernel PUBLIC include)
+target_link_libraries(harness_kernel PRIVATE harness_flags)
 set_target_properties(harness_kernel PROPERTIES
   OUTPUT_NAME harness_kernel
   VERSION ${PROJECT_VERSION}
@@ -97,7 +104,7 @@ add_executable(harness-kernel src/main.cpp)
 target_include_directories(harness-kernel PRIVATE src)
 target_link_libraries(harness-kernel PRIVATE harness_kernel_static harness_flags)
 target_compile_definitions(harness-kernel PRIVATE
-  HARNESS_VERSION_STRING="${PROJECT_VERSION}"
+  HARNESS_VERSION_STRING="${HARNESS_RELEASE_VERSION}"
   HARNESS_BUILD_COMMIT_STRING="${HARNESS_BUILD_COMMIT}"
 )
 

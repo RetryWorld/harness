@@ -12,7 +12,7 @@ harness-kernel-<ver>-<target>.tar.gz
 ```
 
 The simulation rig unpacks this same tarball, verifies the same SHA256 against
-the same `release-manifest.json`, and `dlopen`s the same `.so` through the same
+the same `release-manifest-<target>.json`, and `dlopen`s the same `.so` through the same
 C ABI. There is no wheel, no Python extension module, and no privileged install
 path — which is what makes *"the thresholds were derived with the code that
 enforces them"* a property of the build rather than a sentence in a README.

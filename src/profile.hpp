@@ -34,6 +34,15 @@ struct OperatingRegime {
     double max = 0.0;
 };
 
+// What space Projection's output_region bounds are expressed in. Torque
+// thresholds are embodiment-scoped and non-inheriting (sim-stack decision
+// record, ROS 2 §4): a torque bound fitted on one robot's actuators has no
+// defensible meaning transferred to another's, so a torque-domain profile
+// must name the embodiment it was derived for. Velocity and Cartesian bounds
+// carry no such requirement — they are the same physical quantity across
+// embodiments.
+enum class Domain { kTorque, kVelocity, kCartesian };
+
 struct HarnessProfile {
     std::string profile_version;
     std::string model_node;
@@ -44,6 +53,8 @@ struct HarnessProfile {
     TransportBudget transport_budget;
     OperatingRegime operating_regime;
     std::string fallback_node;
+    Domain domain = Domain::kTorque;
+    std::string embodiment;  // required iff domain == kTorque
 
     // Fail closed. A profile that does not validate must not load: a robot
     // running an incoherent envelope is worse than one that refuses to start,

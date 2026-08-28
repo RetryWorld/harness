@@ -2,13 +2,13 @@
 # One-line install of the harness kernel release artifact, mirroring the
 # `curl | sh` UX of tools like rustup/deno/bun:
 #
-#   curl -fsSL https://raw.githubusercontent.com/<org>/<repo>/main/edge/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/<org>/<repo>/main/scripts/install.sh | sh
 #
 # This does NOT compile anything and does NOT touch a package manager. It
 # downloads the same tarball `build_artifact.sh` produces and GitHub Actions
 # publishes to a release, verifies it against `release-manifest.json`'s
 # sha256, and unpacks it. That is the same artifact the simulation rig loads
-# (see edge/RELEASE.md) — there is no separate "install path" that could
+# (see RELEASE.md) — there is no separate "install path" that could
 # drift from what the tests actually exercised.
 #
 # Usage:
@@ -20,7 +20,7 @@
 # pipe, often through `sh` explicitly, before anyone can assume bash exists.
 set -eu
 
-# The org isn't final yet (see edge/RELEASE.md — no release process exists as
+# The org isn't final yet (see RELEASE.md — no release process exists as
 # of this writing); override with HARNESS_REPO once the release repo is named.
 REPO="${HARNESS_REPO:-RetryWorld/harness}"
 VERSION="${1:-${HARNESS_VERSION:-latest}}"
@@ -36,8 +36,12 @@ need tar
 # baked into the tarball and manifest filenames, so any drift here is a
 # download 404, not a subtle bug.
 ARCH="$(uname -m)"
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-TARGET="${ARCH}-${OS}-gnu"
+case "$(uname -s)" in
+  Linux)  OS_TAG=linux-gnu ;;
+  Darwin) OS_TAG=apple-darwin ;;
+  *)      OS_TAG="$(uname -s | tr '[:upper:]' '[:lower:]')" ;;
+esac
+TARGET="${ARCH}-${OS_TAG}"
 
 echo "== target: $TARGET"
 

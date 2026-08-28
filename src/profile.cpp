@@ -39,6 +39,29 @@ bool read_string(const json::Value& obj, std::string_view key, std::string& out,
     return true;
 }
 
+// Missing is not an error here — callers use this for fields that carry a
+// default (Domain) rather than fields whose absence makes a profile
+// incoherent. A present-but-wrong-typed value is still rejected.
+bool read_string_optional(const json::Value& obj, std::string_view key, std::string& out,
+                          std::string& err) {
+    const json::Value* v = obj.find(key);
+    if (v == nullptr) return true;
+    if (!v->is_string()) {
+        if (err.empty()) err = "field is not a string: " + std::string(key);
+        return false;
+    }
+    out = v->string();
+    return true;
+}
+
+bool parse_domain(const std::string& s, Domain& out, std::string& err) {
+    if (s == "torque") { out = Domain::kTorque; return true; }
+    if (s == "velocity") { out = Domain::kVelocity; return true; }
+    if (s == "cartesian") { out = Domain::kCartesian; return true; }
+    err = "unknown domain: " + s + " (want torque, velocity, or cartesian)";
+    return false;
+}
+
 bool read_doubles(const json::Value& obj, std::string_view key, std::vector<double>& out,
                   std::string& err) {
     const json::Value* v = require(obj, key, err);
@@ -96,6 +119,10 @@ std::optional<std::string> HarnessProfile::validate() const {
     if (fallback_node.empty()) {
         return "fallback_node is empty; Transfer would have nowhere to hand authority";
     }
+    if (domain == Domain::kTorque && embodiment.empty()) {
+        return "domain is torque but embodiment is empty; a torque bound is not "
+               "defensible without the embodiment it was derived for";
+    }
     return std::nullopt;
 }
 
@@ -136,6 +163,11 @@ ProfileParseResult parse_profile(std::string_view json_text) noexcept {
             read_string(*orr, "signal", p.operating_regime.signal, err);
             read_number(*orr, "max", p.operating_regime.max, err);
         }
+
+        std::string domain_str = "torque";  // default: existing profiles are torque bounds
+        read_string_optional(root, "domain", domain_str, err);
+        if (err.empty()) parse_domain(domain_str, p.domain, err);
+        read_string_optional(root, "embodiment", p.embodiment, err);
 
         if (!err.empty()) return {std::nullopt, err};
         if (std::optional<std::string> v = p.validate()) return {std::nullopt, *v};

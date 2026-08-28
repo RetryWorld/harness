@@ -51,7 +51,9 @@ const char* kProfileJson = R"({
   "inference_budget": {"wcet_ms": 8.0, "rate_hz": 100.0},
   "transport_budget": {"max_payload_bytes": 4096, "deadline_ms": 2.0},
   "operating_regime": {"signal": "/vla_policy/ood_score", "max": 0.7},
-  "fallback_node": "/safety_controller"
+  "fallback_node": "/safety_controller",
+  "domain": "torque",
+  "embodiment": "fr3"
 })";
 
 harness::OutputRegion region() {
@@ -164,11 +166,39 @@ void test_profile_fails_closed() {
              "transport_budget":{"max_payload_bytes":1,"deadline_ms":1},
              "operating_regime":{"signal":"/s","max":0.5},
              "fallback_node":"/f"})", "empty output region"},
+        // A torque-domain profile with no named embodiment can't be scoped to
+        // one — the concrete form of "torque thresholds are non-inheriting."
+        {R"({"profile_version":"x","model_node":"/a","output_topic":"/b",
+             "output_region":{"lo":[-1.0],"hi":[1.0]},"max_staleness_ms":1,
+             "inference_budget":{"wcet_ms":1,"rate_hz":100},
+             "transport_budget":{"max_payload_bytes":1,"deadline_ms":1},
+             "operating_regime":{"signal":"/s","max":0.5},
+             "fallback_node":"/f","domain":"torque"})", "torque domain without embodiment"},
+        {R"({"profile_version":"x","model_node":"/a","output_topic":"/b",
+             "output_region":{"lo":[-1.0],"hi":[1.0]},"max_staleness_ms":1,
+             "inference_budget":{"wcet_ms":1,"rate_hz":100},
+             "transport_budget":{"max_payload_bytes":1,"deadline_ms":1},
+             "operating_regime":{"signal":"/s","max":0.5},
+             "fallback_node":"/f","domain":"not_a_domain"})", "unknown domain"},
     };
     for (const auto& c : cases) {
         auto r = harness::parse_profile(c.json);
         check(!r.profile.has_value(), c.why, __LINE__);
     }
+}
+
+void test_domain_velocity_needs_no_embodiment() {
+    // Velocity/Cartesian bounds are the same physical quantity across
+    // embodiments, so — unlike torque — they carry no embodiment requirement.
+    const char* json = R"({"profile_version":"x","model_node":"/a","output_topic":"/b",
+        "output_region":{"lo":[-1.0],"hi":[1.0]},"max_staleness_ms":1,
+        "inference_budget":{"wcet_ms":1,"rate_hz":100},
+        "transport_budget":{"max_payload_bytes":1,"deadline_ms":1},
+        "operating_regime":{"signal":"/s","max":0.5},
+        "fallback_node":"/f","domain":"velocity"})";
+    auto r = harness::parse_profile(json);
+    CHECK(r.profile.has_value());
+    if (r.profile) CHECK(r.profile->domain == harness::Domain::kVelocity);
 }
 
 void test_json_hostile_input_does_not_crash() {
@@ -265,6 +295,7 @@ int main() {
     test_no_allocation_on_decision_path();
     test_profile_parse_and_validate();
     test_profile_fails_closed();
+    test_domain_velocity_needs_no_embodiment();
     test_json_hostile_input_does_not_crash();
     test_c_abi_round_trip();
     test_batch_matches_single_bitwise();

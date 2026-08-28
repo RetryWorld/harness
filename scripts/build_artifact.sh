@@ -11,12 +11,22 @@
 #
 # Outputs to dist/:
 #   harness-kernel-<ver>-<target>.tar.gz   bin/ lib/ include/ share/
-#   release-manifest.json                   version, commit, compiler, ABI, sha256
+#   release-manifest-<target>.json          version, commit, compiler, ABI, sha256
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VERSION="${1:?usage: build_artifact.sh <version>}"
-TARGET="${TARGET:-$(uname -m)-$(uname -s | tr '[:upper:]' '[:lower:]')-gnu}"
+# Must match install.sh's TARGET computation exactly (see the comment there) —
+# any drift here is a manifest/tarball 404 on install.
+if [ -z "${TARGET:-}" ]; then
+  ARCH="$(uname -m)"
+  case "$(uname -s)" in
+    Linux)  OS_TAG=linux-gnu ;;
+    Darwin) OS_TAG=apple-darwin ;;
+    *)      OS_TAG="$(uname -s | tr '[:upper:]' '[:lower:]')" ;;
+  esac
+  TARGET="${ARCH}-${OS_TAG}"
+fi
 OUT=dist
 BUILD=build-release
 rm -rf "$OUT" "$BUILD" && mkdir -p "$OUT"
@@ -41,6 +51,7 @@ GEN=""; command -v ninja >/dev/null 2>&1 && GEN="-G Ninja"
 cmake -S . -B "$BUILD" $GEN \
   -DCMAKE_BUILD_TYPE=Release \
   -DHARNESS_BUILD_COMMIT="$COMMIT" \
+  -DHARNESS_RELEASE_VERSION="$VERSION" \
   -DCMAKE_INSTALL_PREFIX="$PWD/$STAGE"
 cmake --build "$BUILD" --parallel
 
@@ -59,7 +70,7 @@ rm -rf "$BUILD-san"
 echo "== abi check"
 # The header and the library must agree. A header change without an ABI bump is
 # how a consumer silently misreads the envelope.
-HDR_ABI=$(grep -oP '#define HARNESS_ABI_VERSION \K[0-9]+' include/harness_kernel.h)
+HDR_ABI=$(sed -n -E 's/#define HARNESS_ABI_VERSION ([0-9]+)/\1/p' include/harness_kernel.h)
 LIB_ABI=$("$BUILD/harness-kernel" --abi)
 if [ "$HDR_ABI" != "$LIB_ABI" ]; then
   echo "ERROR: header ABI $HDR_ABI != library ABI $LIB_ABI" >&2
@@ -78,7 +89,8 @@ tar -C "$OUT" -czf "$TARBALL" "harness-kernel-$VERSION"
 rm -rf "$STAGE"
 
 SHA=$(sha256sum "$TARBALL" | cut -d' ' -f1)
-cat > "$OUT/release-manifest.json" <<JSON
+MANIFEST="$OUT/release-manifest-$TARGET.json"
+cat > "$MANIFEST" <<JSON
 {
   "version": "$VERSION",
   "commit": "$COMMIT",
@@ -91,4 +103,4 @@ cat > "$OUT/release-manifest.json" <<JSON
   }
 }
 JSON
-cat "$OUT/release-manifest.json"
+cat "$MANIFEST"
