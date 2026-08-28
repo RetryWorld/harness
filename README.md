@@ -27,8 +27,8 @@ edge/
 | Check | Result |
 |---|---|
 | `cmake --build` with `-Werror` and a wide warning set | clean |
-| `ctest` | **92 checks, 0 failures** |
-| ASan + UBSan | 92 checks, 0 failures |
+| `ctest` | **96 checks, 0 failures** |
+| ASan + UBSan | 96 checks, 0 failures |
 | `isolation_check.sh` (standalone, offline, no deps) | pass |
 | Exported symbols | exactly the 10 `harness_*` C ABI functions |
 | Loaded from Python via `ctypes` | works, incl. fail-closed profile rejection |
@@ -85,7 +85,7 @@ accepting a nearly-valid one is the wrong failure mode.
 | Piece | State |
 |---|---|
 | Projection: value-range, type, finiteness | done, allocation-free, tested |
-| Harness Profile parse + fail-closed validate | done, incl. joint wcet/rate admission |
+| Harness Profile parse + fail-closed validate | done, incl. joint wcet/rate admission and Domain (torque/velocity/cartesian) — torque requires a named `embodiment`, non-inheriting |
 | C ABI + header + ABI version check | done |
 | Standalone build, sanitizers, symbol hygiene | done |
 | **Projection: stability, freshness, schedulability, delivery** | missing |
