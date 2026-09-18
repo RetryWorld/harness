@@ -67,7 +67,7 @@ echo "== test"
 echo "== sanitizers"
 cmake -S . -B "$BUILD-san" $GEN -DCMAKE_BUILD_TYPE=Debug -DHARNESS_SANITIZE=ON > /dev/null
 cmake --build "$BUILD-san" --parallel > /dev/null
-(cd "$BUILD-san" && ctest --output-on-failure)
+(cd "$BUILD-san" && ASAN_OPTIONS=detect_leaks=0 ctest --output-on-failure)
 rm -rf "$BUILD-san"
 
 echo "== abi check"

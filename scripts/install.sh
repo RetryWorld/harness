@@ -37,8 +37,7 @@ need tar
 ARCH="$(uname -m)"
 case "$(uname -s)" in
   Linux)  OS_TAG=linux-gnu ;;
-  Darwin) OS_TAG=apple-darwin ;;
-  *)      OS_TAG="$(uname -s | tr '[:upper:]' '[:lower:]')" ;;
+  *)      err "Rearguard currently supports Linux edge computers only" ;;
 esac
 TARGET="${ARCH}-${OS_TAG}"
 
