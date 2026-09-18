@@ -240,13 +240,14 @@ int run_connect(const ConnectOptions& options) {
     if (options.json) {
         std::printf("%s\n", Json{{"status", "pending"},
                                   {"user_code", display_code},
-                                  {"verification_url", "https://rearguard.dev/device"}}
+                                  {"verification_instruction",
+                                   "Enter this code in the Connect your robot page already open in your browser."}}
                                  .dump()
                                  .c_str());
     } else {
         std::printf("Rearguard device pairing\n\n");
-        std::printf("Open https://rearguard.dev/device\n");
-        std::printf("and enter this code:\n\n  %s\n\n", display_code.c_str());
+        std::printf("In the browser where you are signed in, return to\n");
+        std::printf("Connect your robot and enter this code:\n\n  %s\n\n", display_code.c_str());
         std::printf("Waiting for approval...\n");
         std::printf("This code expires in 10 minutes. Press Ctrl-C to cancel.\n");
         std::fflush(stdout);

@@ -358,8 +358,8 @@ a network.
 $ rearguard connect
 Rearguard device pairing
 
-Open https://rearguard.dev/device
-and enter this code:
+In the browser where you are signed in, return to
+Connect your robot and enter this code:
 
   RG7K-M2QF
 
