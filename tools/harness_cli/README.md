@@ -348,6 +348,33 @@ $ rearguard abi
 
 ---
 
+### `connect`
+
+Authenticates a headless edge computer with a Rearguard web account. The CLI
+uses outbound HTTPS only, so the browser and edge computer do not need to share
+a network.
+
+```
+$ rearguard connect
+Rearguard device pairing
+
+Open https://rearguard.dev/device
+and enter this code:
+
+  RG7K-M2QF
+
+Waiting for approval...
+```
+
+The code expires after ten minutes and works once. After browser approval, the
+CLI writes the device ID and its random credential to
+`$XDG_CONFIG_HOME/rearguard/device.json` (or
+`~/.config/rearguard/device.json`) with mode `0600`. The database stores only a
+SHA-256 digest of that credential. `--name <device-name>` overrides the Linux
+hostname and `--json` produces machine-readable progress records.
+
+---
+
 ### `uninstall`
 
 Removes an installation created by `scripts/install.sh`.

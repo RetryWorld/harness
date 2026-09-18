@@ -16,7 +16,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(harness_kernel
-        VERSION 0.2.0
+        VERSION 0.3.0
         DESCRIPTION "Physical AI harness kernel (v2 — schema-driven)"
         LANGUAGES CXX C)
 
@@ -216,6 +216,7 @@ target_link_libraries(harness_replay PUBLIC harness_kernel_core harness_mcap har
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(SQLite3 REQUIRED)
+find_package(CURL REQUIRED)
 if(TARGET SQLite3::SQLite3)
   set(HARNESS_SQLITE_TARGET SQLite3::SQLite3)
 else()
@@ -245,14 +246,18 @@ if(HARNESS_WITH_ROS2)
 else()
   target_sources(harness_observation PRIVATE observation/native/ros_unavailable.cpp)
 endif()
-add_executable(harness_cli tools/harness_cli/main.cpp tools/harness_cli/uninstall.cpp)
+add_executable(harness_cli
+  tools/harness_cli/main.cpp
+  tools/harness_cli/connect.cpp
+  tools/harness_cli/uninstall.cpp)
 set_target_properties(harness_cli PROPERTIES OUTPUT_NAME rearguard)
 target_include_directories(harness_cli PRIVATE src tools/harness_cli)
 target_link_libraries(harness_cli PRIVATE
   harness_observation harness_kernel_core harness_profile_lib harness_mcap harness_replay harness_format harness_proto
-  protobuf::libprotobuf yaml-cpp::yaml-cpp harness_flags ${CMAKE_DL_LIBS})
+  protobuf::libprotobuf yaml-cpp::yaml-cpp harness_flags CURL::libcurl OpenSSL::Crypto ${CMAKE_DL_LIBS})
 target_compile_definitions(harness_cli PRIVATE
-  HARNESS_CRITIC_LIB_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+  HARNESS_CRITIC_LIB_DIR="${CMAKE_CURRENT_BINARY_DIR}"
+  REARGUARD_VERSION="${PROJECT_VERSION}")
 foreach(HARNESS_OBSERVATION_BINDING so101.json g1_warehouse.json)
   configure_file(observation/${HARNESS_OBSERVATION_BINDING}
     share/harness/observation/${HARNESS_OBSERVATION_BINDING} COPYONLY)

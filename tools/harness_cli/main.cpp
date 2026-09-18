@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include "common.hpp"
+#include "connect.hpp"
 #include "format/event_table.hpp"
 #include "format/json.hpp"
 #include "format/profile_table.hpp"
@@ -737,6 +738,7 @@ int cmd_diff(const std::string& path_a, const std::string& path_b, bool json) {
 void print_usage() {
     std::fprintf(stderr,
                   "usage:\n"
+                  "  rearguard --version\n"
                   "  rearguard validate <profile.yaml> [--json]\n"
                   "  rearguard show <profile.yaml> [--json]\n"
                   "  rearguard replay --profile <profile.yaml> --trace <trace.jsonl> "
@@ -746,6 +748,7 @@ void print_usage() {
                   "  rearguard hash --joints <j0,j1,j2> [--json]\n"
                   "  rearguard diff <a.mcap> <b.mcap> [--json]\n"
                   "  rearguard abi\n"
+                  "  rearguard connect [--name <device-name>] [--json]\n"
                   "  rearguard observe <start|profile|status|capture|windows|promote|proposals> [options]\n"
                   "  rearguard workflow <init|show|outbox|artifact|apply|export-window|generation-request> [options]\n"
                   "  rearguard uninstall [--prefix <dir>] [--dry-run] [--yes] [--json]\n");
@@ -769,6 +772,15 @@ int main(int argc, char** argv) {
     }
     const std::string cmd = argv[1];
 
+    if (cmd == "--version") {
+        if (!expect_exact_args(argc, 0, "--version")) {
+            print_usage();
+            return 1;
+        }
+        std::printf("rearguard %s\n", REARGUARD_VERSION);
+        return 0;
+    }
+
     if (cmd == "observe" || cmd == "workflow") {
         return harness::observation::command_main(cmd, argc - 2, argv + 2);
     }
@@ -780,6 +792,18 @@ int main(int argc, char** argv) {
         }
         std::printf("%u\n", hk_abi_version());
         return 0;
+    }
+
+    if (cmd == "connect") {
+        harness::cli::ConnectOptions opts;
+        FlagParser flags;
+        flags.add("--name", &opts.device_name);
+        flags.add_bool("--json", &opts.json);
+        if (!flags.parse(argc, argv, 2)) {
+            print_usage();
+            return 1;
+        }
+        return harness::cli::run_connect(opts);
     }
 
     if (cmd == "validate") {
