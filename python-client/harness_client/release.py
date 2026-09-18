@@ -11,7 +11,8 @@ without shelling out to a POSIX script.
 
 `build.py`'s `ensure_kernel()` compiles `edge/` from source — the right tool
 while you're iterating on the kernel itself, or don't have a released version
-yet. `RELEASE.md` is explicit that anything derived from a source build stays
+yet. `edge/README.md` ("Releasing") is explicit that anything derived from a
+source build stays
 non-authoritative and must never be what a customer-facing rig loads:
 
     # WRONG — the rig would exercise a build no customer ever receives

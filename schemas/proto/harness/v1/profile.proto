@@ -1,0 +1,124 @@
+// The Harness Profile — the deployment artifact the kernel consumes.
+//
+// The structural constraints that make this schema meaningful (C1-C11) cannot
+// be expressed in protobuf and live instead in the hand-written validator at
+// edge/src/profile/. See build brief §4.4 for the constraint table.
+//
+// Every scalar below that must be explicitly authored (bound, budget,
+// threshold, timeout) is declared `optional` so the validator can reject
+// absent presence rather than silently trusting a proto3 zero default — an
+// omitted torque bound must not deserialise as 0.0, and an omitted wcet_ms
+// must not read as a zero budget. This does not apply to identity fields
+// (ids, versions, hashes) or to enforcement events, where the writer always
+// sets every field it emits.
+
+syntax = "proto3";
+
+package harness.v1;
+
+import "harness/v1/critic.proto";
+import "harness/v1/enforcement.proto";
+import "harness/v1/provenance.proto";
+
+message ProfileRef {
+  string profile_id = 1;
+  string profile_version = 2;
+  // Denormalised on purpose: C9 ("thresholds are embodiment-scoped and
+  // non-inheriting") must be checkable from this profile alone, without the
+  // validator resolving and loading the parent profile.
+  string embodiment_class_id = 3;
+}
+
+message Bound {
+  optional double min = 1;
+  optional double max = 2;
+}
+
+message Embodiment {
+  string class_id = 1;              // e.g. "unitree_g1_29dof"
+  uint32 dof = 2;
+  repeated string joint_names = 3;  // ordered
+  string joint_order_hash = 4;      // hex over canonicalised joint_names
+}
+
+message ModelBinding {
+  string model_node = 1;
+  string output_topic = 2;
+  OutputInterface output_interface = 3;
+}
+
+message Projection {
+  enum OnReject {
+    ON_REJECT_UNSPECIFIED = 0;
+    ON_REJECT_HOLD_LAST = 1;
+    ON_REJECT_ZERO = 2;
+    ON_REJECT_REJECT = 3;
+  }
+
+  repeated Bound output_region = 1;
+  optional double max_staleness_ms = 2;
+  OnReject on_reject = 3;
+}
+
+message Isolation {
+  optional double inference_wcet_ms = 1;
+  optional double inference_rate_hz = 2;
+  optional uint32 max_payload_bytes = 3;
+  optional double transport_deadline_ms = 4;
+  optional uint64 critic_budget_total_us = 5;
+}
+
+message Recovery {
+  string evidence_class = 1;             // matches a declared CriticDecl.evidence_class (C3)
+  string action_ref = 2;
+  optional uint32 retry_budget = 3;
+  optional double timeout_ms = 4;
+  Predicate reentry_predicate = 5;       // REQUIRED — validator rejects PREDICATE_UNSPECIFIED (C6)
+}
+
+message BandA {
+  repeated Recovery recoveries = 1;
+}
+
+message BandB {
+  optional double reject_rate_window_ms = 1;
+  optional double reject_rate_max = 2;
+  optional uint32 overrun_count_max = 3;
+  optional string ood_signal = 4;
+  optional double ood_max = 5;
+  string fallback_node = 6;
+  bool latch = 7;
+}
+
+// Precedence is NOT a field. Band B preempts Band A unconditionally, in
+// kernel code — see build brief §4.3.
+message Transfer {
+  BandA band_a = 1;
+  BandB band_b = 2;
+}
+
+message Timing {
+  ClockDomain clock_domain = 1;
+  bool timing_authoritative = 2;
+}
+
+message Eligibility {
+  bool profile_eligible = 1;
+}
+
+message HarnessProfile {
+  uint32 schema_version = 1;
+  string profile_id = 2;
+  string profile_version = 3;         // semver
+  optional ProfileRef parent_profile = 4;
+
+  Embodiment embodiment = 5;
+  ModelBinding model_binding = 6;
+  Projection projection = 7;
+  Isolation isolation = 8;
+  repeated CriticDecl critics = 9;
+  Transfer transfer = 10;
+  Timing timing = 11;
+  Eligibility eligibility = 12;
+  ProvenanceBlock provenance = 13;
+}

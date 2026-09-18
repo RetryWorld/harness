@@ -10,8 +10,12 @@
 #   ./scripts/build_artifact.sh 0.1.0
 #
 # Outputs to dist/:
-#   harness-kernel-<ver>-<target>.tar.gz   bin/ lib/ include/ share/
+#   harness-kernel-<ver>-<target>.tar.gz   bin/ lib/ include/harness/ share/proto/
 #   release-manifest-<target>.json          version, commit, compiler, ABI, sha256
+#
+# schemas/ is a required build input as of the v2 (schema-driven) kernel —
+# see edge/scripts/isolation_check.sh for why the extraction unit grew from
+# edge/ alone to {schemas/, edge/} together.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -29,6 +33,8 @@ if [ -z "${TARGET:-}" ]; then
 fi
 OUT=dist
 BUILD=build-release
+SCHEMAS_DIR=../schemas
+[ -d schemas ] && SCHEMAS_DIR=schemas
 rm -rf "$OUT" "$BUILD" && mkdir -p "$OUT"
 
 echo "== provenance"
@@ -50,8 +56,6 @@ GEN=""; command -v ninja >/dev/null 2>&1 && GEN="-G Ninja"
 # shellcheck disable=SC2086
 cmake -S . -B "$BUILD" $GEN \
   -DCMAKE_BUILD_TYPE=Release \
-  -DHARNESS_BUILD_COMMIT="$COMMIT" \
-  -DHARNESS_RELEASE_VERSION="$VERSION" \
   -DCMAKE_INSTALL_PREFIX="$PWD/$STAGE"
 cmake --build "$BUILD" --parallel
 
@@ -61,8 +65,7 @@ echo "== test"
 (cd "$BUILD" && ctest --output-on-failure)
 
 echo "== sanitizers"
-cmake -S . -B "$BUILD-san" $GEN -DCMAKE_BUILD_TYPE=Debug -DHARNESS_SANITIZE=ON \
-  -DHARNESS_BUILD_COMMIT="$COMMIT" > /dev/null
+cmake -S . -B "$BUILD-san" $GEN -DCMAKE_BUILD_TYPE=Debug -DHARNESS_SANITIZE=ON > /dev/null
 cmake --build "$BUILD-san" --parallel > /dev/null
 (cd "$BUILD-san" && ctest --output-on-failure)
 rm -rf "$BUILD-san"
@@ -70,25 +73,25 @@ rm -rf "$BUILD-san"
 echo "== abi check"
 # The header and the library must agree. A header change without an ABI bump is
 # how a consumer silently misreads the envelope.
-HDR_ABI=$(sed -n -E 's/#define HARNESS_ABI_VERSION ([0-9]+)/\1/p' include/harness_kernel.h)
-LIB_ABI=$("$BUILD/harness-kernel" --abi)
+HDR_ABI=$(sed -n -E 's/#define HK_ABI_VERSION ([0-9]+)/\1/p' include/harness/harness_kernel.h)
+LIB_ABI=$("$BUILD/rearguard" abi)
 if [ "$HDR_ABI" != "$LIB_ABI" ]; then
-  echo "ERROR: header ABI $HDR_ABI != library ABI $LIB_ABI" >&2
+  echo "ERROR: header ABI $HDR_ABI != library-reported ABI $LIB_ABI" >&2
   exit 1
 fi
 echo "  ABI v$HDR_ABI"
 
 echo "== package"
 cmake --install "$BUILD" > /dev/null
-mkdir -p "$STAGE/share"
-cp ../schemas/proto/harness/v1/enforcement.proto "$STAGE/share/" 2>/dev/null || \
+mkdir -p "$STAGE/share/proto/harness/v1"
+cp "$SCHEMAS_DIR"/proto/harness/v1/*.proto "$STAGE/share/proto/harness/v1/" 2>/dev/null || \
   echo "  (proto not copied — building outside the monorepo, expected post-extraction)"
 
 TARBALL="$OUT/harness-kernel-$VERSION-$TARGET.tar.gz"
 tar -C "$OUT" -czf "$TARBALL" "harness-kernel-$VERSION"
 rm -rf "$STAGE"
 
-SHA=$(sha256sum "$TARBALL" | cut -d' ' -f1)
+SHA=$(sha256sum "$TARBALL" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$TARBALL" | cut -d' ' -f1)
 MANIFEST="$OUT/release-manifest-$TARGET.json"
 cat > "$MANIFEST" <<JSON
 {

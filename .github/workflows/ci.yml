@@ -1,0 +1,291 @@
+# CI gates for the harness invariants layer (build brief §3, §9, §11).
+#
+# Two directories, one workflow: schemas/ is the source of truth generated to
+# C++/Python/TypeScript, and edge/ is schemas/'s only in-repo consumer that
+# needs a native build. See edge/scripts/isolation_check.sh for why they are
+# treated as one extractable unit.
+
+name: harness-ci
+
+on:
+  pull_request:
+    paths:
+      - 'schemas/**'
+      - 'edge/**'
+      - 'backend/**'
+      - 'sim/**'
+      - 'web/**'
+      - '.github/workflows/**'
+  push:
+    branches: [production]
+    paths:
+      - 'schemas/**'
+      - 'edge/**'
+
+env:
+  BUF_VERSION: '1.72.0'
+
+jobs:
+  # ---------------------------------------------------------------------
+  # schemas/: buf lint, breaking-change detection, and generated-code drift.
+  # build brief §3, §9 "Codegen round-trip".
+  # ---------------------------------------------------------------------
+  schemas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # buf breaking needs the production branch's history
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: ${{ env.BUF_VERSION }}
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq protobuf-compiler
+          protoc --version
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install codegen tooling
+        working-directory: schemas
+        run: npm ci
+
+      - name: buf lint
+        working-directory: schemas
+        run: buf lint
+
+      - name: buf breaking (against production)
+        working-directory: schemas
+        # Fails soft on the very first PR that introduces schemas/ to the
+        # production branch — there is nothing to diff against yet. Once
+        # merged once, every subsequent PR is checked for real.
+        run: |
+          if git show origin/production:schemas/buf.yaml > /dev/null 2>&1; then
+            buf breaking --against '../.git#branch=production,subdir=schemas'
+          else
+            echo "no schemas/ on production yet — breaking-change gate starts enforcing after this merges"
+          fi
+
+      # No committed-gen drift check: schemas/gen/ is gitignored, generated
+      # per-machine against whatever protoc is on PATH (see schemas/.gitignore).
+      # The steps below consume this output, so a codegen failure still fails
+      # the job — it just fails on generation, not on a diff.
+      - name: buf generate
+        working-directory: schemas
+        run: buf generate
+
+      - name: generated TypeScript compiles under tsc --strict
+        working-directory: schemas
+        run: |
+          cat > /tmp/tsconfig.ci.json <<'EOF'
+          {
+            "compilerOptions": {
+              "strict": true,
+              "target": "ES2022",
+              "module": "ESNext",
+              "moduleResolution": "bundler",
+              "noEmit": true
+            },
+            "include": ["gen/ts/**/*.ts"]
+          }
+          EOF
+          npx tsc -p /tmp/tsconfig.ci.json
+
+      - name: generated Python imports cleanly
+        run: |
+          python3 -m venv /tmp/schemas-py
+          /tmp/schemas-py/bin/pip install --quiet protobuf
+          /tmp/schemas-py/bin/python3 -c "
+          import sys; sys.path.insert(0, 'schemas/gen/python')
+          from harness.v1 import profile_pb2, enforcement_pb2, critic_pb2, provenance_pb2
+          print('python codegen import OK')
+          "
+
+  # ---------------------------------------------------------------------
+  # edge/: build, full test suite (unit/golden/property/alloc/mcap/abi),
+  # and the standalone-extraction check, on both platforms the release
+  # workflow ships. build brief §9, §11 items 1-2, 8-9.
+  # ---------------------------------------------------------------------
+  edge-build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build libprotobuf-dev protobuf-compiler libyaml-cpp-dev
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja protobuf yaml-cpp
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: ${{ env.BUF_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Generate schemas/gen/ (gitignored output; every job that needs it generates it)
+        working-directory: schemas
+        run: |
+          npm ci
+          buf generate
+
+      - name: Configure + build
+        working-directory: edge
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DHARNESS_BUILD_TESTS=ON
+          cmake --build build
+
+      - name: ctest
+        working-directory: edge/build
+        run: ctest --output-on-failure
+
+      - name: Standalone extraction check (schemas/ + edge/ pair, build brief §2)
+        working-directory: edge
+        run: ./scripts/isolation_check.sh
+
+  # ---------------------------------------------------------------------
+  # ASan+UBSan, kept as its own job so a sanitizer failure is easy to spot
+  # separately from a plain build/test failure. build brief §9 "Sanitisers".
+  # ---------------------------------------------------------------------
+  edge-sanitize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build libprotobuf-dev protobuf-compiler libyaml-cpp-dev
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: ${{ env.BUF_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Generate schemas/gen/
+        working-directory: schemas
+        run: npm ci && buf generate
+
+      - name: Configure + build (ASan+UBSan)
+        working-directory: edge
+        run: |
+          cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DHARNESS_BUILD_TESTS=ON -DHARNESS_SANITIZE=ON
+          cmake --build build-asan
+
+      - name: ctest under sanitizers
+        working-directory: edge/build-asan
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: ctest --output-on-failure
+
+  # ---------------------------------------------------------------------
+  # ABI stability: header diff + exported symbol table diff, and the
+  # dependency rules from build brief §2. Both need Linux (nm -D) and a
+  # built libharness_kernel, so they share this job.
+  # ---------------------------------------------------------------------
+  edge-abi-and-dependency-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build libprotobuf-dev protobuf-compiler libyaml-cpp-dev
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: ${{ env.BUF_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Generate schemas/gen/
+        working-directory: schemas
+        run: npm ci && buf generate
+
+      - name: Configure + build
+        working-directory: edge
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHARNESS_BUILD_TESTS=ON
+          cmake --build build
+
+      - name: ABI check
+        working-directory: edge
+        run: |
+          BASE_REF="origin/${{ github.event.pull_request.base.ref || 'production' }}"
+          git fetch origin "${{ github.event.pull_request.base.ref || 'production' }}" --depth=1 || true
+          ./scripts/check_abi.sh build "$BASE_REF"
+
+      - name: Upload ABI baseline (only meaningful on a bootstrap run)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: abi-symbols-baseline
+          path: edge/abi/symbols.txt
+          if-no-files-found: ignore
+
+      - name: Dependency rules (build brief §2)
+        run: ./edge/scripts/check_dependency_rules.sh edge/build
+
+  # ---------------------------------------------------------------------
+  # Timing: recorded, never gated (build brief §9 "Timing" — absolute WCET
+  # is not decidable on a shared CI runner). Purely informational.
+  # ---------------------------------------------------------------------
+  edge-timing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build libprotobuf-dev protobuf-compiler libyaml-cpp-dev
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: ${{ env.BUF_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Generate schemas/gen/
+        working-directory: schemas
+        run: npm ci && buf generate
+
+      - name: Configure + build
+        working-directory: edge
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build
+
+      - name: Record gate timing (informational — shared runner, not a WCET)
+        working-directory: edge
+        run: |
+          {
+            echo "### Gate timing (informational — shared CI hardware, not a WCET)"
+            echo '```'
+            ./build/harness_cli replay \
+              --profile ../schemas/examples/profiles/bench3.valid.yaml \
+              --trace   ../schemas/examples/traces/a_nominal.jsonl | tail -3
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

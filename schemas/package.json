@@ -1,0 +1,23 @@
+{
+  "name": "@retryworld/schemas-codegen",
+  "version": "1.0.0",
+  "description": "One definition, four consumers, one direction of codegen. Nothing here imports from any package; every package generates from here.",
+  "main": "index.js",
+  "directories": {
+    "example": "examples",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "private": "true",
+  "devDependencies": {
+    "@bufbuild/protobuf": "^2.14.1",
+    "@bufbuild/protoc-gen-es": "^2.14.1",
+    "typescript": "~6.0.2"
+  }
+}

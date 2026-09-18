@@ -1,0 +1,113 @@
+# controller_manager configuration for the mock bring-up.
+#
+# Topology (build brief §7) — the harness sits BETWEEN the command source and
+# the hardware, not beside it:
+#
+#   /upstream_effort_controller/commands  (Float64MultiArray, you publish here)
+#            |
+#            v
+#   upstream_effort_controller  (ForwardCommandController)
+#            |  writes into harness_controller's exported reference interfaces
+#            |  "harness_controller/joint_N/effort"
+#            v
+#   harness_controller          (hk_gate runs here)
+#            |  writes the GATED effort to the hardware command interface
+#            v
+#   joint_N/effort              (mock_components/GenericSystem)
+#
+# Nothing can reach the hardware effort interface except through the gate,
+# because harness_controller claims those interfaces exclusively — that
+# exclusivity is enforced by controller_manager's resource manager, not by
+# convention. Note `golden_joint_order_file` is absent here on purpose: the
+# launch file injects it, since the value is an absolute path that only
+# exists once the package is installed.
+
+controller_manager:
+  ros__parameters:
+    update_rate: 200  # Hz
+
+    harness_controller:
+      type: harness_controller/HarnessController
+
+    upstream_effort_controller:
+      type: forward_command_controller/ForwardCommandController
+
+    # Publishes /joint_states and /dynamic_joint_states. It claims only STATE
+    # interfaces, so it cannot interfere with the gate — but it is what makes
+    # the gated effort observable through ordinary ROS tooling
+    # (`ros2 topic echo /dynamic_joint_states`) rather than only through the
+    # harness's own topics. GenericSystem mirrors the effort command into the
+    # effort state, so what shows up there is what the gate actually emitted.
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+harness_controller:
+  ros__parameters:
+    # Every joint the rig observes. The golden-order assertion runs against
+    # this list.
+    joints:
+      - joint_1
+      - joint_2
+      - joint_3
+
+    # The subset actually gated and written as effort. Equal to `joints` here;
+    # the two are separate parameters because a real embodiment reports state
+    # for far more joints than any one profile gates.
+    command_joints:
+      - joint_1
+      - joint_2
+      - joint_3
+
+    # An arbitrary rehearsal constant with NO derivation behind it. It exists
+    # to make a clamp observable, and must never be copied into a real Harness
+    # Profile — a bound without a derivation tuple is exactly what constraint
+    # C1 exists to refuse.
+    test_torque_limit_nm: 40.0
+
+    index_map_output_path: "/tmp/harness_mock_index_map.json"
+
+    # Sink capacity for one update cycle's enforcement events. Overflow is
+    # counted (dropped_since_last on the next event) and warned about, never
+    # blocked — dropping evidence must not stall the gate.
+    event_buffer_bytes: 8192
+
+    # Band B projection-reject-rate trigger.
+    #
+    # How long sustained violation takes to transfer, concretely: the window
+    # looks back 500 ms, which at this 200 Hz update rate is ~100 samples, and
+    # the trigger fires when the violating fraction of that window exceeds
+    # reject_rate_max. So a continuously-violating command needs to fill more
+    # than half the window — ~50 clamped cycles, ~250 ms. Measured on the mock
+    # bring-up: 50 CLAMP/NOMINAL cycles before the transfer.
+    #
+    # Note kRejectRateMinSamples (= 4, edge/src/kernel/kernel_state.hpp) is
+    # the minimum number of samples needed to EVALUATE the rate at all, not
+    # the number needed to trip it. Those are easy to conflate.
+    #
+    # These numbers are chosen to make the transfer visible in a demo. In
+    # anything real this threshold is exactly the kind of value that must come
+    # from a derivation, not from a YAML file somebody edited once.
+    #
+    # Set band_b_reject_rate_max to 1.0 to make the trigger unreachable (a
+    # rate strictly greater than 1.0 cannot occur) and watch Projection clamp
+    # indefinitely without any authority change.
+    #
+    # Band B is terminal: recovering needs a controller reconfigure, which
+    # builds a fresh hk_handle.
+    band_b_reject_rate_window_ms: 500.0
+    band_b_reject_rate_max: 0.5
+
+upstream_effort_controller:
+  ros__parameters:
+    # NOT joint names — these are harness_controller's exported reference
+    # interfaces. ForwardCommandController builds each claimed interface as
+    # "<joints[i]>/<interface_name>", which resolves to
+    # "harness_controller/joint_1/effort" — the reference interface the
+    # harness exports. That string match is what chains the two controllers;
+    # get it wrong and controller_manager refuses to activate rather than
+    # silently bypassing the gate.
+    joints:
+      - harness_controller/joint_1
+      - harness_controller/joint_2
+      - harness_controller/joint_3
+    interface_name: effort

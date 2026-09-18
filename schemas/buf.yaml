@@ -1,0 +1,15 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # enforcement.proto's existing enum value names (PROJECTION, ADMIT, ...)
+    # predate this lint config and must not be rewritten per the build brief;
+    # renaming would be wire-safe but is still a rewrite of a file the brief
+    # says to extend additively only.
+    - ENUM_VALUE_PREFIX
+breaking:
+  use:
+    - FILE

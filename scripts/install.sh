@@ -2,13 +2,13 @@
 # One-line install of the harness kernel release artifact, mirroring the
 # `curl | sh` UX of tools like rustup/deno/bun:
 #
-#   curl -fsSL https://raw.githubusercontent.com/<org>/<repo>/main/scripts/install.sh | sh
+#   curl -fsSL https://rearguard.dev/install | sh
 #
 # This does NOT compile anything and does NOT touch a package manager. It
 # downloads the same tarball `build_artifact.sh` produces and GitHub Actions
 # publishes to a release, verifies it against `release-manifest.json`'s
 # sha256, and unpacks it. That is the same artifact the simulation rig loads
-# (see RELEASE.md) — there is no separate "install path" that could
+# (see README.md, "Releasing") — there is no separate "install path" that could
 # drift from what the tests actually exercised.
 #
 # Usage:
@@ -20,8 +20,7 @@
 # pipe, often through `sh` explicitly, before anyone can assume bash exists.
 set -eu
 
-# The org isn't final yet (see RELEASE.md — no release process exists as
-# of this writing); override with HARNESS_REPO once the release repo is named.
+# Override the release source for mirrors or pre-production testing.
 REPO="${HARNESS_REPO:-RetryWorld/harness}"
 VERSION="${1:-${HARNESS_VERSION:-latest}}"
 INSTALL_DIR="${HARNESS_INSTALL_DIR:-$HOME/.harness}"
@@ -100,12 +99,17 @@ mkdir -p "$INSTALL_DIR"
 rm -rf "$INSTALL_DIR/bin" "$INSTALL_DIR/lib" "$INSTALL_DIR/include" "$INSTALL_DIR/share"
 cp -r "$EXTRACTED_ROOT/." "$INSTALL_DIR/"
 
-BIN="$INSTALL_DIR/bin/harness-kernel"
+# rearguard, not "harness-kernel": the v1 daemon (src/main.cpp, --version/
+# --abi) is gone, and the only executable the tarball carries now is the CLI
+# (see CMakeLists.txt install(TARGETS ...) and README.md's "What you get").
+BIN="$INSTALL_DIR/bin/rearguard"
 [ -x "$BIN" ] || err "install completed but $BIN is missing or not executable"
 
 echo "== sanity check"
-"$BIN" --version
-"$BIN" --abi
+# `abi` exercises the installed shared library through the C ABI, so this
+# catches an unpacked tree whose binary and .so disagree -- not just a file
+# that happens to exist.
+"$BIN" abi
 
 # Make it runnable without a fresh shell knowing $INSTALL_DIR: append a PATH
 # line once, the same idempotent pattern rustup/deno use, rather than
@@ -125,3 +129,4 @@ else
 fi
 
 echo "== installed harness-kernel $RELEASE_VERSION ($TARGET) to $INSTALL_DIR"
+echo "== to remove it later: rearguard uninstall"

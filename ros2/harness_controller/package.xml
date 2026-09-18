@@ -1,0 +1,50 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>harness_controller</name>
+  <version>0.0.0</version>
+  <description>
+    Thin rclcpp ros2_control ChainableControllerInterface wrapping the harness
+    kernel's C ABI (edge/include/harness_kernel.h). Owns no safety logic — every
+    predicate evaluation happens inside harness_project(), so the binary
+    validated by this package's plugin-load test is the binary that ships.
+    Stage 1 rehearsal rig only; see sim/gazebo_rig.
+  </description>
+  <maintainer email="karvouniarisalex@gmail.com">retry.world</maintainer>
+  <license>proprietary</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>controller_interface</depend>
+  <depend>hardware_interface</depend>
+  <depend>pluginlib</depend>
+  <depend>realtime_tools</depend>
+  <depend>protobuf</depend>
+  <depend>std_msgs</depend>
+  <!-- The ROS-facing interface contract, versioned independently of the
+       kernel's C ABI. Integrators depend on harness_msgs, not on this
+       package's internals. -->
+  <depend>harness_msgs</depend>
+  <!-- /diagnostics is where a customer's existing monitoring already looks. -->
+  <depend>diagnostic_msgs</depend>
+
+  <!-- Mock bring-up (bringup/): not needed to build or ship the plugin, only
+       to run it against mock_components/GenericSystem. -->
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>ros2_controllers</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>python3-protobuf</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>lifecycle_msgs</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

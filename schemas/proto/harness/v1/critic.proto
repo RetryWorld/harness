@@ -1,0 +1,20 @@
+// Critic declarations — what a profile says about the critics it runs.
+// Evidence classes are deliberately open string tags, not a closed enum: a
+// critic introduces a new evidence class by declaring it here, matched
+// structurally against Transfer.band_a.recoveries[].evidence_class (C3 in
+// profile.proto), with no schema change required.
+
+syntax = "proto3";
+
+package harness.v1;
+
+import "harness/v1/provenance.proto";
+
+message CriticDecl {
+  string critic_id = 1;
+  string evidence_class = 2;
+  optional double window_ms = 3;
+  optional uint64 wcet_us = 4;
+  string impl_hash = 5;
+  ProvenanceBlock provenance = 6;
+}

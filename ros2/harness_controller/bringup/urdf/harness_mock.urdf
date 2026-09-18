@@ -1,0 +1,92 @@
+<?xml version="1.0"?>
+<!--
+  Minimal 3-joint arm backed by mock_components/GenericSystem.
+
+  Deliberately NOT a simulator. Per the development plan's Step 4, the
+  controller is brought up first against a mock system: a real
+  controller_manager, a real executor, real DDS, real lifecycle transitions
+  and a real update loop — but no physics, no Gazebo, no contact model. That
+  isolates "does the gate run correctly inside ros2_control" from "does the
+  robot behave", which are different failures with different fixes.
+
+  GenericSystem mirrors each command interface into the state interface of
+  the same name, so joint_N/effort reads back whatever the harness controller
+  last wrote. That makes the gated command directly observable from
+  /dynamic_joint_states without a simulator in the loop.
+
+  The link geometry is nominal — nothing here is derived from a real
+  embodiment, and no threshold may ever be taken from it.
+-->
+<robot name="harness_mock">
+
+  <link name="base_link"/>
+
+  <link name="link_1"/>
+  <link name="link_2"/>
+  <link name="link_3"/>
+
+  <joint name="joint_1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link_1"/>
+    <origin xyz="0 0 0.1" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.14" upper="3.14" effort="100.0" velocity="3.0"/>
+  </joint>
+
+  <joint name="joint_2" type="revolute">
+    <parent link="link_1"/>
+    <child link="link_2"/>
+    <origin xyz="0 0 0.2" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.14" upper="3.14" effort="100.0" velocity="3.0"/>
+  </joint>
+
+  <joint name="joint_3" type="revolute">
+    <parent link="link_2"/>
+    <child link="link_3"/>
+    <origin xyz="0 0 0.2" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.14" upper="3.14" effort="100.0" velocity="3.0"/>
+  </joint>
+
+  <ros2_control name="HarnessMockSystem" type="system">
+    <hardware>
+      <plugin>mock_components/GenericSystem</plugin>
+    </hardware>
+
+    <!--
+      The URDF <limit effort="100.0"> above is NOT the harness bound. It is
+      the robot description's own limit, enforced (if at all) by the hardware.
+      The harness's Projection bound is test_torque_limit_nm in the controller
+      config, deliberately tighter, so a clamp is observable well before any
+      URDF limit would come into play.
+    -->
+    <joint name="joint_1">
+      <command_interface name="effort"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+
+    <joint name="joint_2">
+      <command_interface name="effort"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+
+    <joint name="joint_3">
+      <command_interface name="effort"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+  </ros2_control>
+
+</robot>

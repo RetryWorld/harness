@@ -1,0 +1,13 @@
+# The golden joint order (§8). The controller aborts on_configure if the
+# `joints` parameter does not match this list exactly, in this order — no
+# remap, no best-effort reorder, no warning-only path.
+#
+# It exists because ProjectionEvent.candidate/.emitted are positional
+# `repeated double` with nothing in the wire format anchoring position or
+# unit. An episode whose joint ordering cannot be reconstructed is not usable
+# for threshold derivation, and a silently reordered one is worse than
+# useless: it derives a bound for the wrong actuator.
+joints:
+  - joint_1
+  - joint_2
+  - joint_3

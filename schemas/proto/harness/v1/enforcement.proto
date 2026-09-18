@@ -1,0 +1,198 @@
+// Enforcement events. Our events, not ROS's — Protobuf, not CDR (§9.4).
+// Mirrored ROS topics ride CDR channels in the same file on the same timeline.
+//
+// Compatibility rule: field numbers are permanent. Never reuse, never renumber.
+// A threshold shipped to a customer is read back by a decoder that may be older
+// than the writer that produced it.
+
+syntax = "proto3";
+
+package harness.v1;
+
+import "harness/v1/provenance.proto";
+
+// Nanoseconds since the MCAP file epoch. See §9.5 for the log_time/publish_time
+// convention; this is the harness kernel's own gate-decision stamp, and it is
+// what goes into the MCAP Message.publish_time field.
+message Stamp {
+  uint64 ns = 1;
+}
+
+enum Mechanism {
+  MECHANISM_UNSPECIFIED = 0;
+  PROJECTION = 1;
+  ISOLATION = 2;
+  TRANSFER = 3;
+  CRITIC = 4;
+  REENTRY = 5;
+}
+
+// Which clock a stamp or an episode's timing is measured against. Lives here
+// (not in profile.proto) so EpisodeHeader and EnforcementEvent can both use it
+// without profile.proto importing back into enforcement.proto.
+enum ClockDomain {
+  CLOCK_UNSPECIFIED = 0;
+  CLOCK_SIM = 1;
+  CLOCK_WALL = 2;
+}
+
+// Interface a model binding writes commands as. Lives here rather than nested
+// under profile.proto's ModelBinding for the same reason as ClockDomain:
+// EpisodeHeader needs it and must not import profile.proto.
+enum OutputInterface {
+  OUTPUT_INTERFACE_UNSPECIFIED = 0;
+  EFFORT = 1;
+  POSITION = 2;
+  VELOCITY = 3;
+}
+
+enum Verdict {
+  VERDICT_UNSPECIFIED = 0;
+  ADMIT = 1;
+  DROP = 2;
+  REPLACE = 3;  // substituted last admitted value
+}
+
+// Which predicate in the Projection conjunction failed. A rejection with no
+// named predicate is unusable for threshold derivation, so this is required
+// whenever verdict != ADMIT.
+enum Predicate {
+  PREDICATE_UNSPECIFIED = 0;
+  TYPE_COMPATIBILITY = 1;
+  TIMESTAMP_FRESHNESS = 2;
+  VALUE_RANGE = 3;
+  TRAJECTORY_STABILITY = 4;
+  SCHEDULABILITY = 5;
+  DELIVERY_FEASIBILITY = 6;
+  LIFECYCLE_STATE = 7;
+}
+
+message ProjectionEvent {
+  Stamp decided_at = 1;
+  Verdict verdict = 2;
+  repeated Predicate failed = 3;
+  repeated double candidate = 4;   // raw model output
+  repeated double emitted = 5;     // what actually reached the actuator
+  double margin = 6;               // signed distance to the binding predicate
+  string binding_predicate_detail = 7;
+  // The EEF command as it stood before the robosuite/VLA decode layer
+  // (policy output -> composite/whole-body controller -> joint commands),
+  // logged alongside every event but never gated on. Without this, a
+  // rejection cannot distinguish a bad VLA sample from a well-behaved sample
+  // decoded badly by a mistuned controller -- different fallback answers.
+  repeated double pre_decode_eef = 8;
+}
+
+message IsolationEvent {
+  Stamp decided_at = 1;
+  double inference_ms = 2;
+  double wcet_budget_ms = 3;
+  uint32 payload_bytes = 4;
+  uint32 payload_budget_bytes = 5;
+  bool compute_overrun = 6;
+  bool comm_overrun = 7;
+  double slot_utilisation = 8;
+}
+
+// Which safety band Transfer holds authority under. Band A is task-preserving
+// recovery; Band B is safety fallback and preempts Band A unconditionally.
+// Precedence is not a field: it is enforced in kernel code, not configured.
+enum Band {
+  BAND_UNSPECIFIED = 0;
+  BAND_NOMINAL = 1;
+  BAND_A = 2;
+  BAND_B = 3;
+}
+
+message TransferEvent {
+  Stamp decided_at = 1;
+  bool to_baseline = 2;            // false == return of authority to the model
+  string from_node = 3;
+  string to_node = 4;
+  double ood_score = 5;
+  double ood_threshold = 6;
+  string trigger = 7;              // ood | projection_reject_rate | isolation_overrun
+  double handoff_transient_ms = 8;
+  bool baseline_stabilised = 9;
+  double dwell_ms = 10;            // time held at baseline before return
+
+  Band from_band = 11;
+  Band to_band = 12;
+  string recovery_ref = 13;        // set when to_band == BAND_A
+  uint32 retry_index = 14;
+  bool preempted_band_a = 15;      // Band B fired while Band A was in flight
+}
+
+message CriticEvent {
+  Stamp decided_at = 1;
+  string critic_id = 2;
+  string evidence_class = 3;
+  double confidence = 4;
+  uint32 suggested_mode = 5;       // advisory only, never authoritative
+  bytes evidence_payload = 6;
+  uint64 eval_elapsed_us = 7;
+  uint64 eval_declared_wcet_us = 8;
+}
+
+message ReentryEvent {
+  Stamp decided_at = 1;
+  string recovery_ref = 2;
+  bool predicate_result = 3;
+  string denied_reason = 4;
+  uint32 retry_index = 5;
+}
+
+message EnforcementEvent {
+  string event_id = 1;
+  Mechanism mechanism = 2;
+  string profile_version = 3;
+  string model_node = 4;
+  string output_topic = 5;
+  uint64 step_index = 6;
+  double sim_time_s = 7;            // meaningful only when clock_domain == CLOCK_SIM
+
+  uint64 seq = 8;                   // monotone per session, no gaps
+  uint32 dropped_since_last = 9;    // ring-buffer losses since the previous event
+
+  oneof body {
+    ProjectionEvent projection = 10;
+    IsolationEvent isolation = 11;
+    TransferEvent transfer = 12;
+    CriticEvent critic = 13;
+    ReentryEvent reentry = 14;
+  }
+
+  ClockDomain clock_domain = 15;
+  optional uint64 wall_time_ns = 16; // populated when clock_domain == CLOCK_WALL
+}
+
+// One per episode, written once at the head of the file. Duplicates the MCAP
+// Metadata record deliberately: metadata is easy for a human to grep, this is
+// what a decoder reads.
+message EpisodeHeader {
+  string schema = 1;
+  string sweep_id = 2;
+  string scenario_id = 3;
+  uint64 episode_index = 4;
+  uint64 seed = 5;
+  string mjcf_hash = 6      [deprecated = true];
+  string mujoco_version = 7 [deprecated = true];
+  string profile_version = 8;
+  string replay_digest = 9;
+  bool authoritative = 10;
+
+  DerivationTuple derivation = 11;  // replaces 6 and 7
+
+  // Preflight identity — what actually loaded, recorded once per episode. An
+  // episode whose joint ordering cannot be reconstructed is not usable for
+  // threshold derivation: ProjectionEvent.candidate/.emitted are positional
+  // repeated double with nothing else in the wire format anchoring position
+  // or unit.
+  repeated string joint_names = 12;
+  string joint_order_hash = 13;
+  OutputInterface output_interface = 14;
+  uint32 kernel_abi_version = 15;
+  string kernel_build_hash = 16;
+  string profile_hash = 17;
+  ClockDomain clock_domain = 18;
+}

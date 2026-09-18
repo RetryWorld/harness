@@ -1,0 +1,13 @@
+<library path="harness_controller">
+  <class
+    name="harness_controller/HarnessController"
+    type="harness_controller::HarnessController"
+    base_class_type="controller_interface::ChainableControllerInterface">
+    <description>
+      Chainable controller that gates joint effort references through the
+      harness kernel's hk_gate() decision path
+      (edge/include/harness/harness_kernel.h) before writing hardware effort
+      command interfaces. Stage 1 rehearsal rig only — see sim/gazebo_rig.
+    </description>
+  </class>
+</library>

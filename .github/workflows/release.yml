@@ -14,6 +14,9 @@ on:
 permissions:
   contents: write
 
+env:
+  BUF_VERSION: '1.72.0'
+
 jobs:
   build:
     strategy:
@@ -32,11 +35,23 @@ jobs:
 
       - name: Install build tools (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build protobuf-compiler libprotobuf-dev libyaml-cpp-dev nlohmann-json3-dev libssl-dev libsqlite3-dev
 
       - name: Install build tools (macOS)
         if: runner.os == 'macOS'
-        run: brew install cmake ninja
+        run: brew install cmake ninja protobuf yaml-cpp nlohmann-json openssl@3 sqlite
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: ${{ env.BUF_VERSION }}
+
+      - name: Generate C++ schemas
+        working-directory: schemas
+        run: >-
+          buf generate
+          --template '{"version":"v2","plugins":[{"protoc_builtin":"cpp","out":"gen/cpp"}]}'
 
       - name: Isolation check
         run: ./scripts/isolation_check.sh

@@ -1,0 +1,10 @@
+version: v2
+plugins:
+  - protoc_builtin: cpp
+    out: gen/cpp
+  - protoc_builtin: python
+    out: gen/python
+  - local: node_modules/.bin/protoc-gen-es
+    out: gen/ts
+    opt:
+      - target=ts

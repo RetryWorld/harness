@@ -1,0 +1,8 @@
+{"t_ns": 0, "effort": [0.0, 0.0, 0.0], "position": [0.0, 0.0, 0.0], "velocity": [0.0, 0.0, 0.0], "aux": {"retention": 1.0}}
+{"t_ns": 10000000, "effort": [0.0, 5.0, 0.0], "position": [0.0, 0.05, 0.0], "velocity": [0.0, 0.5, 0.0], "aux": {"retention": 1.0}}
+{"t_ns": 20000000, "effort": [0.0, 11.0, 0.0], "position": [0.0, 0.10, 0.0], "velocity": [0.0, 0.5, 0.0], "aux": {"retention": 1.0}}
+{"t_ns": 30000000, "effort": [0.0, 12.0, 0.0], "position": [0.0, 0.15, 0.0], "velocity": [0.0, 0.5, 0.0], "aux": {"retention": 1.0}}
+{"t_ns": 40000000, "effort": [0.0, 13.0, 0.0], "position": [0.0, 0.20, 0.0], "velocity": [0.0, 0.5, 0.0], "aux": {"retention": 1.0}}
+{"t_ns": 50000000, "effort": [0.0, 14.0, 0.0], "position": [0.0, 0.25, 0.0], "velocity": [0.0, 0.5, 0.0], "aux": {"retention": 1.0}}
+{"t_ns": 60000000, "effort": [0.0, 15.0, 0.0], "position": [0.0, 0.30, 0.0], "velocity": [0.0, 0.5, 0.0], "aux": {"retention": 1.0}}
+{"t_ns": 70000000, "effort": [0.0, 16.0, 0.0], "position": [0.0, 0.35, 0.0], "velocity": [0.0, 0.5, 0.0], "aux": {"retention": 1.0}}

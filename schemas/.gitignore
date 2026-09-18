@@ -1,0 +1,13 @@
+node_modules/
+__pycache__/
+*.pyc
+
+# Generated protobuf code (cpp, python, ts) — machine-specific, not committed.
+#
+# buf.gen.yaml's cpp and python plugins are `protoc_builtin`: buf has no
+# embedded compiler for those, so it shells out to whatever protoc is on PATH,
+# and the output carries a hard version assert against that protoc's runtime
+# (the #error block at the top of any .pb.h). Committing it meant every dev
+# box and CI runner with a different protobuf package produced a spurious diff.
+# Generate it instead: `buf generate` here, or scripts/install_harness.sh.
+gen/

@@ -1,0 +1,54 @@
+// Provenance — where a profile's thresholds or an episode's data actually came
+// from. Engine-neutral by design: nothing here reads a stack decision into the
+// schema. See profile.proto §4.2 and enforcement.proto EpisodeHeader.
+
+syntax = "proto3";
+
+package harness.v1;
+
+enum Engine {
+  ENGINE_UNSPECIFIED = 0;
+  ENGINE_MUJOCO = 1;
+  ENGINE_GAZEBO = 2;
+  ENGINE_HARDWARE = 3;
+  ENGINE_OTHER = 4;
+}
+
+enum ProvenanceSource {
+  PROVENANCE_SOURCE_UNSPECIFIED = 0;
+  PROVENANCE_SOURCE_SIMULATION = 1;
+  PROVENANCE_SOURCE_HARDWARE = 2;
+  PROVENANCE_SOURCE_HAND_AUTHORED = 3;
+}
+
+enum Confidence {
+  CONFIDENCE_UNSPECIFIED = 0;
+  CONFIDENCE_SEED = 1;
+  CONFIDENCE_VALIDATED = 2;
+  CONFIDENCE_DEPLOYED = 3;
+}
+
+// What produced a trace, byte for byte. `engine_config_hash` carries whatever
+// the engine's own configuration looks like (solver options, timestep,
+// substeps) as an opaque hash, so this tuple survives a change of simulator
+// without the schema needing to know what any particular engine's config
+// shape is.
+message DerivationTuple {
+  Engine engine = 1;
+  string engine_version = 2;
+  string model_hash = 3;
+  string engine_config_hash = 4;
+  optional uint64 seed = 5;
+  string initial_state_hash = 6;
+  string action_trace_hash = 7;
+  string profile_version = 8;
+}
+
+message ProvenanceBlock {
+  DerivationTuple derivation = 1;
+  ProvenanceSource source = 2;
+  optional uint32 geometry_provenance_tier = 3;
+  Confidence confidence = 4;
+  string derived_by = 5;
+  string notes = 6;
+}

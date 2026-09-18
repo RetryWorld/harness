@@ -1,0 +1,87 @@
+schema_version: 1
+profile_id: bench3
+profile_version: 0.1.0
+
+embodiment:
+  class_id: bench3_arm
+  dof: 3
+  joint_names: [j0, j1, j2]
+  joint_order_hash: 33dbfb07113ef0bc
+
+model_binding:
+  model_node: vla_policy
+  output_topic: /bench3/cmd_effort
+  output_interface: EFFORT
+
+projection:
+  output_region:
+    - {min: -10.0, max: 10.0}
+    - {min: -10.0, max: 10.0}
+  max_staleness_ms: 50.0
+  on_reject: ON_REJECT_HOLD_LAST
+
+isolation:
+  inference_wcet_ms: 8.0
+  inference_rate_hz: 100.0
+  max_payload_bytes: 4096
+  transport_deadline_ms: 5.0
+  critic_budget_total_us: 2000
+
+critics:
+  - critic_id: threshold_critic
+    evidence_class: grasp_retention_lost
+    window_ms: 200.0
+    wcet_us: 500
+    impl_hash: deadbeef
+    provenance:
+      derivation:
+        engine: ENGINE_MUJOCO
+        engine_version: 3.1.0
+        model_hash: abc123
+        engine_config_hash: cfg123
+        initial_state_hash: init123
+        action_trace_hash: trace123
+        profile_version: 0.1.0
+      source: PROVENANCE_SOURCE_SIMULATION
+      confidence: CONFIDENCE_VALIDATED
+      derived_by: alex
+
+transfer:
+  band_a:
+    recoveries:
+      - evidence_class: grasp_retention_lost
+        action_ref: regrasp
+        retry_budget: 2
+        timeout_ms: 500.0
+        reentry_predicate: LIFECYCLE_STATE
+  band_b:
+    reject_rate_window_ms: 1000.0
+    reject_rate_max: 0.2
+    overrun_count_max: 3
+    ood_signal: retention
+    ood_max: 0.5
+    fallback_node: safe_hold
+    latch: true
+
+timing:
+  clock_domain: CLOCK_SIM
+  timing_authoritative: false
+
+eligibility:
+  profile_eligible: true
+
+provenance:
+  derivation:
+    engine: ENGINE_MUJOCO
+    engine_version: 3.1.0
+    model_hash: abc123
+    engine_config_hash: cfg123
+    seed: 42
+    initial_state_hash: init123
+    action_trace_hash: trace123
+    profile_version: 0.1.0
+  source: PROVENANCE_SOURCE_SIMULATION
+  geometry_provenance_tier: 1
+  confidence: CONFIDENCE_VALIDATED
+  derived_by: alex
+  notes: bench golden profile

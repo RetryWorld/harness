@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "mode": "observation_only",
+  "robot": "so101",
+  "clock": "ros_sim",
+  "critics": [],
+  "recoveries": [],
+  "joint_order": ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"],
+  "command_interface": "position",
+  "topics": [
+    {"name": "/joint_states", "type": "sensor_msgs/msg/JointState", "role": "joint_state"},
+    {"name": "/arm_controller/commands", "type": "std_msgs/msg/Float64MultiArray", "role": "action"},
+    {"name": "/camera/image_raw", "type": "sensor_msgs/msg/Image", "role": "camera"},
+    {"name": "/wrist_camera/image_raw", "type": "sensor_msgs/msg/Image", "role": "camera"}
+  ]
+}
