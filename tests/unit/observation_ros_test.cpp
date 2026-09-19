@@ -108,7 +108,8 @@ void live_test(const fs::path &root) {
                   "30"});
   rclcpp::InitOptions init;
   init.set_domain_id(static_cast<std::size_t>(domain));
-  rclcpp::init(0, nullptr, init);
+  const char *ros_argv[] = {"harness_observation_ros_tests"};
+  rclcpp::init(1, ros_argv, init);
   auto node = std::make_shared<rclcpp::Node>("native_observation_fixture");
   auto joints =
       node->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
