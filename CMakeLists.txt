@@ -321,6 +321,11 @@ if(HARNESS_BUILD_TESTS)
   if(HARNESS_WITH_ROS2)
     add_executable(harness_observation_ros_tests tests/unit/observation_ros_test.cpp)
     target_link_libraries(harness_observation_ros_tests PRIVATE harness_observation harness_flags)
+    # GCC 13 reports a null-dereference false positive from std::construct_at
+    # while instantiating Jazzy's rclcpp test-side templates. Keep the warning
+    # visible, but do not let this external-header diagnostic fail this target.
+    target_compile_options(harness_observation_ros_tests PRIVATE
+      -Wno-error=null-dereference)
     target_compile_definitions(harness_observation_ros_tests PRIVATE
       HARNESS_OBSERVATION_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/observation/so101.json"
       HARNESS_CLI_BIN="$<TARGET_FILE:harness_cli>")
