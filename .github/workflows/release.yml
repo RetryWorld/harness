@@ -38,6 +38,17 @@ jobs:
         with:
           version: ${{ env.BUF_VERSION }}
 
+      - uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+
+      - name: Install ROS 2 discovery dependencies
+        run: >-
+          sudo apt-get install -y
+          ros-jazzy-rclcpp ros-jazzy-rosbag2-cpp
+          ros-jazzy-sensor-msgs ros-jazzy-std-msgs
+          ros-jazzy-trajectory-msgs ros-jazzy-rosgraph-msgs
+
       - name: Generate C++ schemas
         working-directory: schemas
         run: >-
@@ -48,7 +59,9 @@ jobs:
         run: ./scripts/isolation_check.sh
 
       - name: Build, test, package
-        run: ./scripts/build_artifact.sh "${GITHUB_REF_NAME#v}"
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          HARNESS_WITH_ROS2=ON ./scripts/build_artifact.sh "${GITHUB_REF_NAME#v}"
 
       - uses: actions/upload-artifact@v4
         with:

@@ -748,7 +748,8 @@ void print_usage() {
                   "  rearguard hash --joints <j0,j1,j2> [--json]\n"
                   "  rearguard diff <a.mcap> <b.mcap> [--json]\n"
                   "  rearguard abi\n"
-                  "  rearguard connect [--name <device-name>] [--json]\n"
+                  "  rearguard connect [--name <device-name>] [--scan-settle-ms 750] "
+                  "[--scan-parallelism 16] [--json]\n"
                   "  rearguard scan <setup|runtime> [options]\n"
                   "  rearguard observe <start|profile|status|capture|windows|promote|proposals> [options]\n"
                   "  rearguard workflow <init|show|outbox|artifact|apply|export-window|generation-request> [options]\n"
@@ -797,11 +798,31 @@ int main(int argc, char** argv) {
 
     if (cmd == "connect") {
         harness::cli::ConnectOptions opts;
+        std::string scan_settle_ms = "750";
+        std::string scan_parallelism = "16";
         FlagParser flags;
         flags.add("--name", &opts.device_name);
+        flags.add("--scan-settle-ms", &scan_settle_ms);
+        flags.add("--scan-parallelism", &scan_parallelism);
         flags.add_bool("--json", &opts.json);
         if (!flags.parse(argc, argv, 2)) {
             print_usage();
+            return 1;
+        }
+        try {
+            std::size_t used = 0;
+            opts.scan_settle_ms = std::stoi(scan_settle_ms, &used);
+            if (used != scan_settle_ms.size() || opts.scan_settle_ms < 0 ||
+                opts.scan_settle_ms > 10000)
+                throw std::invalid_argument("range");
+            used = 0;
+            opts.scan_parallelism = std::stoi(scan_parallelism, &used);
+            if (used != scan_parallelism.size() || opts.scan_parallelism < 1 ||
+                opts.scan_parallelism > 32)
+                throw std::invalid_argument("range");
+        } catch (const std::exception&) {
+            std::fprintf(stderr,
+                         "error: scan settle must be 0..10000 ms and parallelism 1..32\n");
             return 1;
         }
         return harness::cli::run_connect(opts);

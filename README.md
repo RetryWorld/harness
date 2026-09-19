@@ -101,6 +101,14 @@ empty critic/recovery lists and presents pending review drafts. This is an
 observation-only stage; actuator enforcement and recovery execution remain
 separate work.
 
+For ROS graph/device discovery and source-rate value capture, use
+`rearguard scan setup` and `rearguard scan runtime`. Their contracts and the
+profile-sync boundary are documented in
+[`strategy/ros-scanning-and-profile-sync.md`](../strategy/ros-scanning-and-profile-sync.md).
+`rearguard connect` invokes the setup sweep automatically after browser
+approval and streams each bounded domain batch to the setup profile feed; the
+standalone command remains available for offline inventory capture.
+
 `rearguard` is the operator surface: validate profiles, replay traces, and
 inspect or compare the recorded episodes.
 
@@ -112,6 +120,7 @@ rearguard replay   --profile <p.yaml> --trace <t.jsonl>
 rearguard verify   <episode.mcap> [--expect-hash <hex>] [--json]
 rearguard hash     <profile.yaml> | --joints <j0,j1,j2> [--json]
 rearguard diff     <a.mcap> <b.mcap> [--json]
+rearguard scan     <setup|runtime> [options]
 rearguard abi
 rearguard uninstall [--prefix <dir>] [--dry-run] [--yes] [--json]
 ```

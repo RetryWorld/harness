@@ -13,12 +13,15 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
+#include "common.hpp"
 #include "service_config.hpp"
 
 namespace harness::cli {
@@ -36,6 +39,8 @@ bool supports_color() {
     return ::isatty(STDOUT_FILENO) != 0 && std::getenv("NO_COLOR") == nullptr &&
            (term == nullptr || std::strcmp(term, "dumb") != 0);
 }
+
+bool is_interactive() { return ::isatty(STDOUT_FILENO) != 0; }
 
 const char* paint(bool enabled, const char* code) { return enabled ? code : ""; }
 
@@ -139,6 +144,193 @@ Json first_row(const HttpResult& result) {
     } catch (const Json::exception&) {
     }
     return {};
+}
+
+bool report_scan_event(const std::string& api_url, const std::string& anon_key,
+                       const std::string& device_id, const std::string& secret,
+                       const std::string& scan_id, int sequence, const std::string& state,
+                       int progress, const Json& payload, int domain_min = -1,
+                       int domain_max = -1, const std::string& error = {}) {
+    Json request{{"p_device_id", device_id},
+                 {"p_device_secret", secret},
+                 {"p_scan_id", scan_id},
+                 {"p_sequence", sequence},
+                 {"p_state", state},
+                 {"p_progress", progress},
+                 {"p_domain_min", domain_min < 0 ? Json(nullptr) : Json(domain_min)},
+                 {"p_domain_max", domain_max < 0 ? Json(nullptr) : Json(domain_max)},
+                 {"p_payload", payload},
+                 {"p_error_message", error.empty() ? Json(nullptr) : Json(error)}};
+    const auto result = post_rpc(api_url, anon_key, "report_device_setup_scan", request);
+    if (result.status >= 200 && result.status < 300) return true;
+    std::fprintf(stderr, "error: could not stream setup scan event: %s\n",
+                 response_message(result).c_str());
+    return false;
+}
+
+harness::observation::Options scan_options(int first, int last, int settle_ms,
+                                           int parallelism) {
+    std::vector<std::string> values{
+        "setup", "--domain-min", std::to_string(first), "--domain-max",
+        std::to_string(last), "--settle-ms", std::to_string(settle_ms),
+        "--parallelism", std::to_string(parallelism)};
+    std::vector<char*> argv;
+    argv.reserve(values.size());
+    for (auto& value : values) argv.push_back(value.data());
+    return harness::observation::Options(static_cast<int>(argv.size()), argv.data());
+}
+
+int run_automatic_setup_scan(const ConnectOptions& options, const std::string& api_url,
+                             const std::string& anon_key, const std::string& device_id,
+                             const std::string& secret) {
+    constexpr int kFirstDomain = 0;
+    constexpr int kLastDomain = 232;
+    constexpr int kDomainCount = kLastDomain - kFirstDomain + 1;
+    const int batch_size = options.scan_parallelism;
+    const std::string scan_id = harness::observation::unique_id();
+    int sequence = 0;
+
+    if (options.json) {
+        std::printf("%s\n", Json{{"status", "scan_started"},
+                                  {"scan_id", scan_id},
+                                  {"domain_min", kFirstDomain},
+                                  {"domain_max", kLastDomain}}
+                                 .dump()
+                                 .c_str());
+    } else {
+        const bool color = supports_color();
+        std::printf("  %s›%s %s3.%s Discovering the ROS 2 graph automatically\n",
+                    paint(color, "\033[1;36m"), paint(color, "\033[0m"),
+                    paint(color, "\033[1m"), paint(color, "\033[0m"));
+        std::printf("    Domains 0–232 · %d concurrent · %d ms discovery window\n",
+                    batch_size, options.scan_settle_ms);
+        std::fflush(stdout);
+    }
+
+    bool synced = report_scan_event(api_url, anon_key, device_id, secret, scan_id,
+                                    sequence, "scanning", 0, nullptr);
+
+    Json inventory{{"schema", "rearguard.ros_setup_inventory"},
+                   {"schema_version", 2},
+                   {"captured_wall_ns", 0},
+                   {"scan", {{"domain_min", kFirstDomain},
+                              {"domain_max", kLastDomain},
+                              {"settle_ms", options.scan_settle_ms},
+                              {"parallelism", batch_size}}},
+                   {"available_domain_ids", Json::array()},
+                   {"domains", Json::array()},
+                   {"ros", nullptr},
+                   {"device", nullptr}};
+    try {
+        for (int first = kFirstDomain; first <= kLastDomain; first += batch_size) {
+            const int last = std::min(kLastDomain, first + batch_size - 1);
+            if (!options.json && is_interactive()) {
+                const bool color = supports_color();
+                static constexpr char frames[] = {'|', '/', '-', '\\'};
+                const int completed = first - kFirstDomain;
+                const int before_progress = (completed * 100) / kDomainCount;
+                constexpr int kBarWidth = 24;
+                const int filled = (before_progress * kBarWidth) / 100;
+                std::printf("\r\033[K    %s%c%s [", paint(color, "\033[1;36m"),
+                            frames[static_cast<unsigned int>(sequence) % 4U],
+                            paint(color, "\033[0m"));
+                for (int cell = 0; cell < kBarWidth; ++cell)
+                    std::printf("%c", cell < filled ? '=' : ' ');
+                std::printf("] %3d%%  scanning domains %d–%d", before_progress, first, last);
+                std::fflush(stdout);
+            }
+            auto batch_options = scan_options(first, last, options.scan_settle_ms, batch_size);
+            auto batch = harness::observation::ros_discover(batch_options);
+            if (inventory["ros"].is_null()) inventory["ros"] = batch["ros"];
+            if (inventory["device"].is_null()) inventory["device"] = batch["device"];
+            for (const auto& id : batch["available_domain_ids"])
+                inventory["available_domain_ids"].push_back(id);
+            for (const auto& domain : batch["domains"])
+                inventory["domains"].push_back(domain);
+
+            const int progress = ((last + 1) * 100) / kDomainCount;
+            ++sequence;
+            synced = report_scan_event(api_url, anon_key, device_id, secret, scan_id,
+                                       sequence, "scanning", progress, batch, first, last) &&
+                     synced;
+            if (options.json) {
+                std::printf("%s\n", Json{{"status", "scan_progress"},
+                                          {"scan_id", scan_id},
+                                          {"sequence", sequence},
+                                          {"progress", progress},
+                                          {"domain_min", first},
+                                          {"domain_max", last},
+                                          {"available_domain_ids", batch["available_domain_ids"]}}
+                                         .dump()
+                                         .c_str());
+            } else if (is_interactive()) {
+                constexpr int kBarWidth = 24;
+                const int filled = (progress * kBarWidth) / 100;
+                std::printf("\r\033[K    %s›%s [", paint(supports_color(), "\033[1;36m"),
+                            paint(supports_color(), "\033[0m"));
+                for (int cell = 0; cell < kBarWidth; ++cell)
+                    std::printf("%c", cell < filled ? '=' : ' ');
+                std::printf("] %3d%%  scanned domains %d–%d", progress, first, last);
+                std::fflush(stdout);
+            }
+        }
+        inventory["captured_wall_ns"] = harness::observation::wall_ns();
+        inventory["inventory_hash"] = harness::observation::digest(inventory);
+        ++sequence;
+        synced = report_scan_event(api_url, anon_key, device_id, secret, scan_id,
+                                   sequence, "completed", 100, inventory) &&
+                 synced;
+        if (options.json) {
+            std::printf("%s\n", Json{{"status", "scan_completed"},
+                                      {"scan_id", scan_id},
+                                      {"sequence", sequence},
+                                      {"synced", synced},
+                                      {"inventory", inventory}}
+                                     .dump()
+                                     .c_str());
+        } else {
+            std::printf("%s  %s✓%s %s3.%s ROS 2 discovery complete · %zu active domain(s)\n",
+                        is_interactive() ? "\r\033[K" : "",
+                        paint(supports_color(), "\033[1;32m"),
+                        paint(supports_color(), "\033[0m"),
+                        paint(supports_color(), "\033[1m"),
+                        paint(supports_color(), "\033[0m"), inventory["domains"].size());
+            if (synced) {
+                std::printf("  %s✓%s %s4.%s Discovery profile synced\n\n",
+                            paint(supports_color(), "\033[1;32m"),
+                            paint(supports_color(), "\033[0m"),
+                            paint(supports_color(), "\033[1m"),
+                            paint(supports_color(), "\033[0m"));
+                std::printf("  %s✓ Device setup is ready.%s Continue in your browser.\n",
+                            paint(supports_color(), "\033[1;32m"),
+                            paint(supports_color(), "\033[0m"));
+            } else {
+                std::printf("  %s!%s %s4.%s Discovery finished, but cloud sync failed\n",
+                            paint(supports_color(), "\033[1;33m"),
+                            paint(supports_color(), "\033[0m"),
+                            paint(supports_color(), "\033[1m"),
+                            paint(supports_color(), "\033[0m"));
+            }
+        }
+        return synced ? 0 : 1;
+    } catch (const std::exception& cause) {
+        std::string message = cause.what();
+        if (message.size() > 1000) message.resize(1000);
+        ++sequence;
+        report_scan_event(api_url, anon_key, device_id, secret, scan_id, sequence,
+                          "failed", 0, nullptr, -1, -1, message);
+        if (options.json) {
+            std::printf("%s\n", Json{{"status", "scan_failed"},
+                                      {"scan_id", scan_id},
+                                      {"error", message}}
+                                     .dump()
+                                     .c_str());
+        } else {
+            std::fprintf(stderr, "%s  ✗ 3. Automatic ROS 2 discovery failed: %s\n",
+                         is_interactive() ? "\r\033[K" : "", message.c_str());
+        }
+        return 1;
+    }
 }
 
 bool write_all(int fd, const std::string& contents) {
@@ -328,14 +520,18 @@ int run_connect(const ConnectOptions& options) {
                                      .c_str());
         } else {
             const bool color = supports_color();
-            std::printf("%s  %s✓%s Connected as %s%s%s\n", color ? "\r\033[K" : "\r",
+            std::printf("%s  %s✓%s %s1.%s Connected as %s%s%s\n",
+                        is_interactive() ? "\r\033[K" : "",
                         paint(color, "\033[1;32m"),
+                        paint(color, "\033[0m"), paint(color, "\033[1m"),
                         paint(color, "\033[0m"), paint(color, "\033[1m"), device_name.c_str(),
                         paint(color, "\033[0m"));
-            std::printf("    %s✓%s Device credential saved to %s\n", paint(color, "\033[1;32m"),
-                        paint(color, "\033[0m"), credential_path.c_str());
+            std::printf("  %s✓%s %s2.%s Device credential saved to %s\n",
+                        paint(color, "\033[1;32m"), paint(color, "\033[0m"),
+                        paint(color, "\033[1m"), paint(color, "\033[0m"),
+                        credential_path.c_str());
         }
-        return 0;
+        return run_automatic_setup_scan(options, api_url, anon_key, device_id, secret);
     }
     ::signal(SIGINT, previous_handler);
     if (interrupted) {

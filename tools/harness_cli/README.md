@@ -31,9 +31,37 @@ rearguard verify   <episode.mcap> [--expect-hash <hex>] [--json]
 rearguard hash     <profile.yaml> [--json]
 rearguard hash     --joints <j0,j1,j2> [--json]
 rearguard diff     <a.mcap> <b.mcap> [--json]
+rearguard scan setup [--domain-min 0] [--domain-max 232]
+                     [--settle-ms 750] [--parallelism 16]
+                     [--out inventory.json]
+rearguard scan runtime --config <binding.json> --session <dir>
+                       [--store <dir>] [--storage mcap|sqlite3]
+                       --domain-id <n> [--wall-timeout 1800]
 rearguard abi
 rearguard uninstall [--prefix <dir>] [--dry-run] [--yes] [--json]
 ```
+
+### `scan setup` / `scan runtime`
+
+`scan setup` scans ROS domains 0 through 232 by default and returns only domains
+where external graph artifacts are discovered. Up to sixteen domain contexts are
+scanned concurrently, configurable with `--parallelism`; the scanner's own
+node, topics and parameter services are excluded. Each available domain
+inventories nodes, topics, publisher/subscriber endpoints, services,
+action-like service groups and controller-manager surfaces. The top-level
+snapshot also includes ROS middleware metadata and basic host capacity. With
+`--out`, the versioned JSON snapshot is written atomically. It requires a
+ROS-enabled build.
+
+`scan runtime` is the high-rate data-plane command. It uses the native
+observer's direct subscriptions and rosbag2/MCAP writer; it does not poll ROS
+CLI commands and does not reread MCAP for each inference. It is intentionally
+the same implementation as `observe start`, exposed under `scan` to make the
+setup/runtime distinction explicit. `--domain-id` is required so the recording
+session is pinned to one of the domains returned by the setup scan.
+
+The architecture and durable profile-sync contract are in
+[`strategy/ros-scanning-and-profile-sync.md`](../../../strategy/ros-scanning-and-profile-sync.md).
 
 ## Where the binary comes from
 
@@ -371,7 +399,13 @@ CLI writes the device ID and its random credential to
 `$XDG_CONFIG_HOME/rearguard/device.json` (or
 `~/.config/rearguard/device.json`) with mode `0600`. The database stores only a
 SHA-256 digest of that credential. `--name <device-name>` overrides the Linux
-hostname and `--json` produces machine-readable progress records.
+hostname. Immediately after approval, `connect` scans ROS domain IDs 0 through
+232 and uploads a start record, each parallel domain-batch result, and the
+terminal inventory. Pairing, credential storage, discovery progress, and cloud
+sync are displayed as one numbered interactive flow. The setup page can
+therefore update before the sweep is finished. `--scan-parallelism` (1..32)
+and `--scan-settle-ms` (0..10000) tune
+the sweep; `--json` emits newline-delimited pairing and scan progress records.
 
 ---
 

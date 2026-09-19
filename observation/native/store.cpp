@@ -107,9 +107,23 @@ Store Store::create(const fs::path &directory, const fs::path &config) {
       "CHECK(id=1), body TEXT NOT NULL); CREATE TABLE receipts(id TEXT PRIMARY "
       "KEY, request_hash TEXT NOT NULL, response TEXT NOT NULL); CREATE TABLE "
       "outbox(seq INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL);");
+  db.exec("BEGIN IMMEDIATE");
   Statement q(db, "INSERT INTO profile VALUES(1, ?)");
   q.bind(1, encoded(state));
   q.next();
+  Json event = {{"schema_version", 1},
+                {"event_id", unique_id()},
+                {"profile_id", state["profile_id"]},
+                {"revision", 0},
+                {"request_id", nullptr},
+                {"operation", "initialize"},
+                {"actor", "local_cli"},
+                {"wall_ns", wall_ns()},
+                {"result", {{"binding_hash", state["binding_hash"]}}}};
+  Statement out(db, "INSERT INTO outbox(body) VALUES(?)");
+  out.bind(1, encoded({{"event", event}, {"profile", state}}));
+  out.next();
+  db.exec("COMMIT");
   fs::create_directories(directory / "artifacts");
   return Store(directory);
 }

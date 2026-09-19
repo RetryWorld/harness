@@ -140,6 +140,30 @@ Json observe(const Options &o) {
     throw std::runtime_error("unknown observation command: " + o.command);
   return ros_request(o, meta);
 }
+Json scan(const Options &o) {
+  if (o.command == "setup") {
+    o.allow("--out --domain-min --domain-max --parallelism --settle-ms");
+    require(o.integer("--settle-ms", 750) >= 0 &&
+                o.integer("--settle-ms", 750) <= 10000,
+            "settle-ms must be between 0 and 10000");
+    auto result = ros_discover(o);
+    if (o.values.contains("--out")) {
+      const auto output = fs::absolute(o.need("--out"));
+      require(output.filename() != ".", "--out must name a file");
+      if (!output.parent_path().empty())
+        fs::create_directories(output.parent_path());
+      atomic_json(output, result);
+      result["output"] = output.string();
+    }
+    return result;
+  }
+  if (o.command == "runtime") {
+    o.allow("--config --session --store --storage --domain-id --wall-timeout");
+    o.need("--domain-id");
+    return ros_start(o);
+  }
+  throw std::runtime_error("unknown scan command: " + o.command);
+}
 } // namespace
 int command_main(const std::string &group, int argc, char **argv) {
   try {
@@ -166,7 +190,15 @@ int command_main(const std::string &group, int argc, char **argv) {
                                  {"promote",
                                   "--session DIR --window ID --description "
                                   "TEXT --operator TEXT"}}
-              : std::map<std::string, std::string>{
+              : group == "scan"
+                    ? std::map<std::string, std::string>{
+                          {"setup", "[--domain-min 0] [--domain-max 232] "
+                                    "[--settle-ms 750] [--parallelism 16] "
+                                    "[--out inventory.json]"},
+                          {"runtime", "--config FILE --session DIR [--store "
+                                      "DIR] [--storage mcap|sqlite3] "
+                                      "--domain-id N [--wall-timeout 1800]"}}
+                    : std::map<std::string, std::string>{
                     {"init", "--store DIR --config FILE"},
                     {"show", "--store DIR"},
                     {"outbox", "--store DIR [--after 0]"},
@@ -189,13 +221,16 @@ int command_main(const std::string &group, int argc, char **argv) {
           << "rearguard " << group
           << (group == "observe" ? " <start|profile|status|windows|proposals|"
                                    "capture|candidate|promote|activate>\n"
+              : group == "scan" ? " <setup|runtime>\n"
                                  : " <init|show|outbox|artifact|apply|export-"
                                    "window|generation-request>\n")
           << "See edge/observation/README.md and WORKFLOW.md for options.\n";
       return argc == 0 ? 1 : 0;
     }
     Options o(argc, argv);
-    const auto result = group == "observe" ? observe(o) : workflow(o);
+    const auto result = group == "observe" ? observe(o)
+                        : group == "scan"  ? scan(o)
+                                            : workflow(o);
     if (!result.is_null())
       std::cout << result.dump(2) << std::endl;
     return result.is_object() && result.contains("ok") && result["ok"] == false

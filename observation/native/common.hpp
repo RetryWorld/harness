@@ -34,6 +34,7 @@ struct Options {
 };
 int command_main(const std::string &group, int argc, char **argv);
 Json ros_start(const Options &options);
+Json ros_discover(const Options &options);
 Json ros_request(const Options &options, const Json &meta);
 fs::path export_window(const fs::path &session, const Json &window,
                        const fs::path &destination);

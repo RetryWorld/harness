@@ -186,7 +186,9 @@ void workflow_tests() {
                 {"operation", "deactivate"}, {"payload", {{"reason", "test"}}}};
   const auto first = f.store.apply(retry);
   check(Store(f.store.root).apply(retry) == first, "durable idempotency");
-  check(f.store.outbox().size() == 1, "retry does not duplicate event");
+  check(f.store.outbox().size() == 2, "retry does not duplicate event");
+  check(f.store.outbox().front()["event"]["operation"] == "initialize",
+        "profile creation enters sync outbox");
   retry["payload"]["reason"] = "changed";
   rejects([&] { f.store.apply(retry); }, "different content");
   retry["request_id"] = "conflict";

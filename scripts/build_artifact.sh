@@ -20,6 +20,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VERSION="${1:?usage: build_artifact.sh <version>}"
+WITH_ROS2="${HARNESS_WITH_ROS2:-OFF}"
 # Must match install.sh's TARGET computation exactly (see the comment there) —
 # any drift here is a manifest/tarball 404 on install.
 if [ -z "${TARGET:-}" ]; then
@@ -56,6 +57,7 @@ GEN=""; command -v ninja >/dev/null 2>&1 && GEN="-G Ninja"
 # shellcheck disable=SC2086
 cmake -S . -B "$BUILD" $GEN \
   -DCMAKE_BUILD_TYPE=Release \
+  -DHARNESS_WITH_ROS2="$WITH_ROS2" \
   -DCMAKE_INSTALL_PREFIX="$PWD/$STAGE"
 cmake --build "$BUILD" --parallel
 
@@ -65,7 +67,8 @@ echo "== test"
 (cd "$BUILD" && ctest --output-on-failure)
 
 echo "== sanitizers"
-cmake -S . -B "$BUILD-san" $GEN -DCMAKE_BUILD_TYPE=Debug -DHARNESS_SANITIZE=ON > /dev/null
+cmake -S . -B "$BUILD-san" $GEN -DCMAKE_BUILD_TYPE=Debug \
+  -DHARNESS_WITH_ROS2="$WITH_ROS2" -DHARNESS_SANITIZE=ON > /dev/null
 cmake --build "$BUILD-san" --parallel > /dev/null
 (cd "$BUILD-san" && ASAN_OPTIONS=detect_leaks=0 ctest --output-on-failure)
 rm -rf "$BUILD-san"

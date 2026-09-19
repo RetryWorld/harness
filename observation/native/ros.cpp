@@ -15,6 +15,9 @@
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <sys/file.h>
+#include <sys/utsname.h>
+#include <thread>
+#include <future>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 #include <unistd.h>
 
@@ -22,15 +25,16 @@ namespace harness::observation {
 namespace {
 using String = std_msgs::msg::String;
 struct RosContext {
+  rclcpp::Context::SharedPtr value = std::make_shared<rclcpp::Context>();
   explicit RosContext(Ns domain) {
-    require(domain >= 0 && domain <= 101, "invalid domain-id");
+    require(domain >= 0 && domain <= 232, "domain-id must be within 0..232");
     rclcpp::InitOptions init;
     init.set_domain_id(static_cast<std::size_t>(domain));
-    rclcpp::init(0, nullptr, init);
+    value->init(0, nullptr, init);
   }
   ~RosContext() {
-    if (rclcpp::ok())
-      rclcpp::shutdown();
+    if (rclcpp::ok(value))
+      value->shutdown("scan/session complete");
   }
 };
 struct SessionLock {
@@ -119,6 +123,7 @@ class Observer {
   RecoveryControllerPlaceholder controller_;
   std::unique_ptr<Runtime> runtime_;
   rclcpp::Node::SharedPtr node_;
+  rclcpp::Context::SharedPtr context_;
   std::unique_ptr<Recording> writer_;
   rclcpp::Publisher<String>::SharedPtr events_, replies_, profiles_;
   std::vector<rclcpp::GenericSubscription::SharedPtr> subscriptions_;
@@ -380,9 +385,11 @@ class Observer {
   }
 
 public:
-  Observer(const Options &options, fs::path session, Json config)
+  Observer(const Options &options, fs::path session, Json config,
+           rclcpp::Context::SharedPtr context)
       : options_(options), session_(std::move(session)),
-        config_(std::move(config)), lock_(session_), evidence_(config_, id_) {
+        config_(std::move(config)), lock_(session_), evidence_(config_, id_),
+        context_(std::move(context)) {
     require(!fs::exists(session_ / "session.json"),
             "session already exists; use a new directory (evidence is never "
             "overwritten)");
@@ -396,6 +403,7 @@ public:
           std::make_unique<Runtime>(*store_, runtime_critic_, controller_);
     }
     rclcpp::NodeOptions node_options;
+    node_options.context(context_);
     node_options.parameter_overrides(
         {rclcpp::Parameter("use_sim_time", config_["clock"] == "ros_sim")});
     node_ = std::make_shared<rclcpp::Node>(
@@ -459,7 +467,7 @@ public:
                                  {"recoveries", Json::array()}});
       rclcpp::executors::SingleThreadedExecutor executor;
       executor.add_node(node_);
-      while (rclcpp::ok() &&
+      while (rclcpp::ok(context_) &&
              static_cast<double>(monotonic_ns() - started) / 1e9 <
                  options_.number("--wall-timeout", 1800)) {
         executor.spin_once(std::chrono::milliseconds(100));
@@ -468,7 +476,7 @@ public:
           next_status = monotonic_ns() + 1000000000LL;
         }
       }
-      if (!rclcpp::ok())
+      if (!rclcpp::ok(context_))
         termination = "interrupted";
     } catch (...) {
       finish("error");
@@ -501,9 +509,230 @@ Json ros_start(const Options &options) {
           "storage must be mcap or sqlite3");
   RosContext context(options.integer("--domain-id", 71));
   fs::create_directories(session);
-  Observer observer(options, session, config);
+  Observer observer(options, session, config, context.value);
   observer.run();
   return nullptr;
+}
+Json discover_domain(Ns domain, Ns settle_ms) {
+  RosContext context(domain);
+  const auto scanner_name = "harness_setup_scan_" + unique_id().substr(0, 8);
+  rclcpp::NodeOptions node_options;
+  node_options.context(context.value);
+  auto node = std::make_shared<rclcpp::Node>(scanner_name, node_options);
+
+  // DDS discovery is asynchronous. This is a single bounded wait, never a
+  // ros2 CLI subprocess per artifact. The graph is then copied in one pass.
+  const auto deadline = monotonic_ns() + settle_ms * 1000000LL;
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(node);
+  while (rclcpp::ok(context.value) && monotonic_ns() < deadline)
+    executor.spin_once(std::chrono::milliseconds(25));
+
+  auto fq_name = [](const std::string &name, const std::string &space) {
+    if (space.empty() || space == "/")
+      return "/" + name;
+    return space + (space.ends_with('/') ? "" : "/") + name;
+  };
+  auto endpoint = [&](const rclcpp::TopicEndpointInfo &info) {
+    return Json{{"node", fq_name(info.node_name(), info.node_namespace())},
+                {"type", info.topic_type()}};
+  };
+
+  Json nodes = Json::array();
+  std::set<std::string> controller_nodes;
+  std::map<std::string, std::set<std::string>> service_servers;
+  const auto graph_nodes = node->get_node_names_and_namespaces();
+  for (const auto &[name, space] : graph_nodes) {
+    if (name == scanner_name)
+      continue;
+    const auto full = fq_name(name, space);
+    nodes.push_back({{"name", name}, {"namespace", space}, {"fq_name", full}});
+    if (name.find("controller") != std::string::npos ||
+        space.find("controller") != std::string::npos)
+      controller_nodes.insert(full);
+    for (const auto &[service, types] :
+         node->get_service_names_and_types_by_node(name, space)) {
+      (void)types;
+      service_servers[service].insert(full);
+    }
+  }
+  std::sort(nodes.begin(), nodes.end(), [](const Json &a, const Json &b) {
+    return a.at("fq_name") < b.at("fq_name");
+  });
+
+  Json topics = Json::array();
+  for (const auto &[name, types] : node->get_topic_names_and_types()) {
+    Json publishers = Json::array(), subscribers = Json::array();
+    for (const auto &info : node->get_publishers_info_by_topic(name))
+      if (info.node_name() != scanner_name)
+        publishers.push_back(endpoint(info));
+    for (const auto &info : node->get_subscriptions_info_by_topic(name))
+      if (info.node_name() != scanner_name)
+        subscribers.push_back(endpoint(info));
+    if (publishers.empty() && subscribers.empty())
+      continue;
+    const auto by_endpoint = [](const Json &a, const Json &b) {
+      const auto &a_node = a.at("node").get_ref<const std::string &>();
+      const auto &b_node = b.at("node").get_ref<const std::string &>();
+      if (a_node != b_node)
+        return a_node < b_node;
+      return a.at("type").get_ref<const std::string &>() <
+             b.at("type").get_ref<const std::string &>();
+    };
+    std::sort(publishers.begin(), publishers.end(), by_endpoint);
+    std::sort(subscribers.begin(), subscribers.end(), by_endpoint);
+    auto sorted_types = types;
+    std::sort(sorted_types.begin(), sorted_types.end());
+    topics.push_back({{"name", name},
+                      {"types", sorted_types},
+                      {"publisher_count", publishers.size()},
+                      {"subscription_count", subscribers.size()},
+                      {"publishers", publishers},
+                      {"subscribers", subscribers}});
+  }
+  std::sort(topics.begin(), topics.end(), [](const Json &a, const Json &b) {
+    return a.at("name") < b.at("name");
+  });
+
+  Json services = Json::array();
+  std::map<std::string, Json> action_services;
+  std::set<std::string> controller_managers;
+  const std::array<std::string, 5> action_suffixes = {
+      "/_action/send_goal", "/_action/get_result", "/_action/cancel_goal",
+      "/_action/feedback", "/_action/status"};
+  for (const auto &[name, types] : node->get_service_names_and_types()) {
+    if (!service_servers.contains(name) || service_servers[name].empty())
+      continue;
+    auto sorted_types = types;
+    std::sort(sorted_types.begin(), sorted_types.end());
+    Json servers = Json::array();
+    for (const auto &server : service_servers[name])
+      servers.push_back(server);
+    services.push_back({{"name", name},
+                        {"types", sorted_types},
+                        {"server_count", servers.size()},
+                        {"servers", servers}});
+    for (const auto &suffix : action_suffixes) {
+      if (name.ends_with(suffix)) {
+        const auto base = name.substr(0, name.size() - suffix.size());
+        auto &entry = action_services[base];
+        if (entry.is_null())
+          entry = {{"name", base}, {"endpoints", Json::array()}};
+        entry["endpoints"].push_back(name.substr(base.size() + 1));
+      }
+    }
+    const auto marker = name.find("/controller_manager/");
+    if (marker != std::string::npos)
+      controller_managers.insert(name.substr(0, marker + 19));
+  }
+  std::sort(services.begin(), services.end(), [](const Json &a, const Json &b) {
+    return a.at("name") < b.at("name");
+  });
+  Json actions = Json::array();
+  for (auto &[name, action] : action_services) {
+    (void)name;
+    auto &endpoints = action["endpoints"];
+    std::sort(endpoints.begin(), endpoints.end());
+    actions.push_back(std::move(action));
+  }
+
+  struct utsname system {};
+  const bool have_uname = ::uname(&system) == 0;
+  char hostname[256]{};
+  const bool have_hostname = ::gethostname(hostname, sizeof(hostname) - 1) == 0;
+  const auto env = [](const char *name) -> Json {
+    const auto *value = std::getenv(name);
+    return value && *value ? Json(value) : Json(nullptr);
+  };
+  const long pages = ::sysconf(_SC_PHYS_PAGES);
+  const long page_size = ::sysconf(_SC_PAGE_SIZE);
+  Json device = {
+      {"hostname", have_hostname ? Json(hostname) : Json(nullptr)},
+      {"os", have_uname ? Json(system.sysname) : Json(nullptr)},
+      {"kernel", have_uname ? Json(system.release) : Json(nullptr)},
+      {"architecture", have_uname ? Json(system.machine) : Json(nullptr)},
+      {"cpu_threads", std::thread::hardware_concurrency()},
+      {"memory_bytes", pages > 0 && page_size > 0
+                           ? Json(static_cast<std::uint64_t>(pages) *
+                                  static_cast<std::uint64_t>(page_size))
+                           : Json(nullptr)}};
+  Json managers = Json::array();
+  for (const auto &manager : controller_managers)
+    managers.push_back(manager);
+  Json controller_node_list = Json::array();
+  for (const auto &controller : controller_nodes)
+    controller_node_list.push_back(controller);
+
+  Json result = {
+      {"schema", "rearguard.ros_setup_inventory"},
+      {"schema_version", 1},
+      {"captured_wall_ns", wall_ns()},
+      {"domain_id", domain},
+      {"settle_ms", settle_ms},
+      {"ros", {{"distro", env("ROS_DISTRO")},
+               {"rmw", env("RMW_IMPLEMENTATION")},
+               {"localhost_only", env("ROS_LOCALHOST_ONLY")}}},
+      {"device", device},
+      {"nodes", nodes},
+      {"topics", topics},
+      {"services", services},
+      {"actions", actions},
+      {"controllers", {{"manager_surfaces", managers},
+                        {"controller_named_nodes", controller_node_list},
+                        {"note", "Controller identities and states require a "
+                                 "controller_manager service query; this graph "
+                                 "snapshot records the discovered surfaces."}}}};
+  result["inventory_hash"] = digest(result);
+  return result;
+}
+Json ros_discover(const Options &options) {
+  const auto first = options.integer("--domain-min", 0);
+  const auto last = options.integer("--domain-max", 232);
+  const auto settle_ms = options.integer("--settle-ms", 750);
+  const auto parallelism = options.integer("--parallelism", 16);
+  require(first >= 0 && last <= 232 && first <= last,
+          "domain range must be within 0..232 and nonempty");
+  require(parallelism >= 1 && parallelism <= 32,
+          "parallelism must be between 1 and 32");
+
+  Json domains = Json::array(), ids = Json::array(), first_snapshot = nullptr;
+  for (Ns batch = first; batch <= last; batch += parallelism) {
+    std::vector<std::future<Json>> pending;
+    const auto end = std::min(last + 1, batch + parallelism);
+    for (Ns domain = batch; domain < end; ++domain)
+      pending.push_back(std::async(std::launch::async, [domain, settle_ms] {
+        return discover_domain(domain, settle_ms);
+      }));
+    for (auto &future : pending) {
+      auto snapshot = future.get();
+      if (first_snapshot.is_null())
+        first_snapshot = snapshot;
+      if (snapshot["nodes"].empty() && snapshot["topics"].empty() &&
+          snapshot["services"].empty())
+        continue;
+      ids.push_back(snapshot["domain_id"]);
+      snapshot.erase("schema");
+      snapshot.erase("schema_version");
+      snapshot.erase("ros");
+      snapshot.erase("device");
+      snapshot.erase("inventory_hash");
+      domains.push_back(std::move(snapshot));
+    }
+  }
+  Json result = {
+      {"schema", "rearguard.ros_setup_inventory"},
+      {"schema_version", 2},
+      {"captured_wall_ns", wall_ns()},
+      {"scan", {{"domain_min", first},
+                {"domain_max", last},
+                {"settle_ms", settle_ms},
+                {"parallelism", parallelism}}},
+      {"available_domain_ids", ids},
+      {"domains", domains},
+      {"ros", first_snapshot["ros"]},
+      {"device", first_snapshot["device"]}};
+  result["inventory_hash"] = digest(result);
+  return result;
 }
 Json ros_request(const Options &options, const Json &meta) {
   Json data = {{"schema_version", 1},
@@ -523,8 +752,10 @@ Json ros_request(const Options &options, const Json &meta) {
                  {"description", options.need("--description")},
                  {"operator", options.need("--operator")}});
   RosContext context(meta.at("domain_id").get<Ns>());
-  auto node = std::make_shared<rclcpp::Node>("harness_observation_cli_" +
-                                             unique_id().substr(0, 8));
+  rclcpp::NodeOptions node_options;
+  node_options.context(context.value);
+  auto node = std::make_shared<rclcpp::Node>(
+      "harness_observation_cli_" + unique_id().substr(0, 8), node_options);
   const auto prefix = meta.at("prefix").get<std::string>();
   Json response = nullptr;
   auto subscription = node->create_subscription<String>(
@@ -542,7 +773,8 @@ Json ros_request(const Options &options, const Json &meta) {
   executor.add_node(node);
   const auto deadline = monotonic_ns() + 15000000000LL;
   Ns next_send = 0;
-  while (rclcpp::ok() && response.is_null() && monotonic_ns() < deadline) {
+  while (rclcpp::ok(context.value) && response.is_null() &&
+         monotonic_ns() < deadline) {
     executor.spin_once(std::chrono::milliseconds(100));
     if (publisher->get_subscription_count() && monotonic_ns() >= next_send) {
       publisher->publish(string_message(data));

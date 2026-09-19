@@ -8,6 +8,7 @@ namespace {
 }
 } // namespace
 Json ros_start(const Options &) { unavailable(); }
+Json ros_discover(const Options &) { unavailable(); }
 Json ros_request(const Options &, const Json &) { unavailable(); }
 fs::path export_window(const fs::path &, const Json &, const fs::path &) {
   unavailable();

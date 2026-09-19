@@ -16,7 +16,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(harness_kernel
-        VERSION 0.3.5
+        VERSION 0.3.6
         DESCRIPTION "Physical AI harness kernel (v2 — schema-driven)"
         LANGUAGES CXX C)
 
@@ -243,6 +243,10 @@ if(HARNESS_WITH_ROS2)
     std_msgs::std_msgs__rosidl_typesupport_cpp
     trajectory_msgs::trajectory_msgs__rosidl_typesupport_cpp
     rosgraph_msgs::rosgraph_msgs__rosidl_typesupport_cpp)
+  # Release artifacts install outside /opt/ros. Retain the ROS library search
+  # path so the CLI starts from an ordinary shell without requiring setup.bash
+  # merely to teach the dynamic loader where Jazzy's libraries live.
+  set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 else()
   target_sources(harness_observation PRIVATE observation/native/ros_unavailable.cpp)
 endif()
