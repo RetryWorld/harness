@@ -138,5 +138,5 @@ else
 fi
 
 printf '\n%b\n' "${GREEN}✓ Installed Rearguard CLI ${RELEASE_VERSION}${RESET} ${DIM}($TARGET)${RESET}"
-printf '%b\n' "  Run ${CYAN}rearguard connect${RESET} to pair this edge computer."
-printf '%b\n' "  Remove it later with ${DIM}rearguard uninstall${RESET}."
+printf '%b\n' "  Pair now: ${CYAN}${BIN} connect${RESET}"
+printf '%b\n' "  In a new terminal, use: ${CYAN}rearguard connect${RESET}"
