@@ -547,7 +547,8 @@ Json discover_domain(Ns domain, Ns settle_ms) {
   Json nodes = Json::array();
   std::set<std::string> controller_nodes;
   std::map<std::string, std::set<std::string>> service_servers;
-  const auto graph_nodes = node->get_node_names_and_namespaces();
+  const auto graph_nodes =
+      node->get_node_graph_interface()->get_node_names_and_namespaces();
   for (const auto &[name, space] : graph_nodes) {
     if (name == scanner_name)
       continue;
