@@ -31,6 +31,14 @@ volatile sig_atomic_t interrupted = 0;
 
 void handle_interrupt(int) { interrupted = 1; }
 
+bool supports_color() {
+    const char* term = std::getenv("TERM");
+    return ::isatty(STDOUT_FILENO) != 0 && std::getenv("NO_COLOR") == nullptr &&
+           (term == nullptr || std::strcmp(term, "dumb") != 0);
+}
+
+const char* paint(bool enabled, const char* code) { return enabled ? code : ""; }
+
 std::string getenv_or(const char* name, const char* fallback) {
     const char* value = std::getenv(name);
     return value != nullptr && value[0] != '\0' ? value : fallback;
@@ -245,18 +253,34 @@ int run_connect(const ConnectOptions& options) {
                                  .dump()
                                  .c_str());
     } else {
-        std::printf("Rearguard device pairing\n\n");
-        std::printf("In the browser where you are signed in, return to\n");
-        std::printf("Connect your robot and enter this code:\n\n  %s\n\n", display_code.c_str());
-        std::printf("Waiting for approval...\n");
-        std::printf("This code expires in 10 minutes. Press Ctrl-C to cancel.\n");
+        const bool color = supports_color();
+        std::printf("%sRearguard%s  %sDevice pairing%s\n\n", paint(color, "\033[1;36m"),
+                    paint(color, "\033[0m"), paint(color, "\033[2m"),
+                    paint(color, "\033[0m"));
+        std::printf("  %s1.%s In your signed-in browser, open %sConnect your robot%s\n",
+                    paint(color, "\033[1;36m"), paint(color, "\033[0m"),
+                    paint(color, "\033[1m"), paint(color, "\033[0m"));
+        std::printf("  %s2.%s Enter this one-time code:\n\n", paint(color, "\033[1;36m"),
+                    paint(color, "\033[0m"));
+        std::printf("       %s%s%s\n\n", paint(color, "\033[1;97;44m"), display_code.c_str(),
+                    paint(color, "\033[0m"));
+        std::printf("  %s•%s This code expires in 10 minutes. Press Ctrl-C to cancel.\n",
+                    paint(color, "\033[2m"), paint(color, "\033[0m"));
         std::fflush(stdout);
     }
 
     interrupted = 0;
     const auto previous_handler = ::signal(SIGINT, handle_interrupt);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(10);
+    unsigned int spinner_frame = 0;
     while (!interrupted && std::chrono::steady_clock::now() < deadline) {
+        if (!options.json) {
+            const bool color = supports_color();
+            static constexpr char frames[] = {'|', '/', '-', '\\'};
+            std::printf("\r  %s%c%s Waiting for browser approval...", paint(color, "\033[1;36m"),
+                        frames[spinner_frame++ % 4U], paint(color, "\033[0m"));
+            std::fflush(stdout);
+        }
         std::this_thread::sleep_for(std::chrono::seconds(2));
         if (interrupted) break;
         const HttpResult polled = post_rpc(api_url, anon_key, "poll_device_pairing",
@@ -303,8 +327,13 @@ int run_connect(const ConnectOptions& options) {
                                      .dump()
                                      .c_str());
         } else {
-            std::printf("\nConnected as %s.\n", device_name.c_str());
-            std::printf("Device credential saved to %s\n", credential_path.c_str());
+            const bool color = supports_color();
+            std::printf("%s  %s✓%s Connected as %s%s%s\n", color ? "\r\033[K" : "\r",
+                        paint(color, "\033[1;32m"),
+                        paint(color, "\033[0m"), paint(color, "\033[1m"), device_name.c_str(),
+                        paint(color, "\033[0m"));
+            std::printf("    %s✓%s Device credential saved to %s\n", paint(color, "\033[1;32m"),
+                        paint(color, "\033[0m"), credential_path.c_str());
         }
         return 0;
     }

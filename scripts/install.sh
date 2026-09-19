@@ -27,6 +27,13 @@ INSTALL_DIR="${HARNESS_INSTALL_DIR:-$HOME/.harness}"
 
 err() { echo "error: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || err "'$1' is required but not found on PATH"; }
+if [ -t 1 ] && [ "${NO_COLOR:-}" = "" ] && [ "${TERM:-}" != "dumb" ]; then
+  CYAN='\033[1;36m'; GREEN='\033[1;32m'; DIM='\033[2m'; RESET='\033[0m'
+else
+  CYAN=''; GREEN=''; DIM=''; RESET=''
+fi
+step() { printf '%b\n' "${CYAN}›${RESET} $*"; }
+okay() { printf '%b\n' "${GREEN}✓${RESET} $*"; }
 
 need curl
 need tar
@@ -41,7 +48,8 @@ case "$(uname -s)" in
 esac
 TARGET="${ARCH}-${OS_TAG}"
 
-echo "== target: $TARGET"
+printf '\n%b\n\n' "${CYAN}Rearguard${RESET} ${DIM}Harness CLI installer${RESET}"
+step "Target: $TARGET"
 
 if [ "$VERSION" = "latest" ]; then
   BASE_URL="https://github.com/$REPO/releases/latest/download"
@@ -57,7 +65,7 @@ MANIFEST_NAME="release-manifest-$TARGET.json"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-echo "== fetching $MANIFEST_NAME ($VERSION)"
+step "Fetching release manifest ($VERSION)"
 curl -fsSL "$BASE_URL/$MANIFEST_NAME" -o "$WORK/manifest.json" \
   || err "no release manifest for $TARGET at $BASE_URL/$MANIFEST_NAME (unsupported platform, or no release published yet)"
 
@@ -72,11 +80,11 @@ TARBALL_PATH="$(json_field path "$WORK/manifest.json")"
 TARBALL_SHA="$(json_field sha256 "$WORK/manifest.json")"
 [ -n "$TARBALL_PATH" ] && [ -n "$TARBALL_SHA" ] || err "malformed manifest at $BASE_URL/$MANIFEST_NAME"
 
-echo "== fetching $TARBALL_PATH"
+step "Downloading Rearguard CLI $RELEASE_VERSION"
 curl -fsSL "$BASE_URL/$TARBALL_PATH" -o "$WORK/kernel.tar.gz" \
   || err "download failed: $BASE_URL/$TARBALL_PATH"
 
-echo "== verifying sha256"
+step "Verifying SHA-256"
 if command -v sha256sum >/dev/null 2>&1; then
   ACTUAL_SHA="$(sha256sum "$WORK/kernel.tar.gz" | cut -d' ' -f1)"
 else
@@ -85,8 +93,9 @@ else
 fi
 [ "$ACTUAL_SHA" = "$TARBALL_SHA" ] \
   || err "sha256 mismatch: manifest says $TARBALL_SHA, downloaded file is $ACTUAL_SHA"
+okay "Release verified"
 
-echo "== installing to $INSTALL_DIR"
+step "Installing to $INSTALL_DIR"
 rm -rf "$WORK/extracted"
 mkdir -p "$WORK/extracted"
 tar -C "$WORK/extracted" -xzf "$WORK/kernel.tar.gz"
@@ -104,11 +113,12 @@ cp -r "$EXTRACTED_ROOT/." "$INSTALL_DIR/"
 BIN="$INSTALL_DIR/bin/rearguard"
 [ -x "$BIN" ] || err "install completed but $BIN is missing or not executable"
 
-echo "== sanity check"
+step "Checking installed CLI"
 # `abi` exercises the installed shared library through the C ABI, so this
 # catches an unpacked tree whose binary and .so disagree -- not just a file
 # that happens to exist.
 "$BIN" abi
+okay "CLI is ready"
 
 # Make it runnable without a fresh shell knowing $INSTALL_DIR: append a PATH
 # line once, the same idempotent pattern rustup/deno use, rather than
@@ -127,5 +137,6 @@ else
   echo "== add this to your shell profile: $PATH_LINE"
 fi
 
-echo "== installed harness-kernel $RELEASE_VERSION ($TARGET) to $INSTALL_DIR"
-echo "== to remove it later: rearguard uninstall"
+printf '\n%b\n' "${GREEN}✓ Installed Rearguard CLI ${RELEASE_VERSION}${RESET} ${DIM}($TARGET)${RESET}"
+printf '%b\n' "  Run ${CYAN}rearguard connect${RESET} to pair this edge computer."
+printf '%b\n' "  Remove it later with ${DIM}rearguard uninstall${RESET}."
