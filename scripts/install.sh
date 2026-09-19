@@ -120,9 +120,8 @@ step "Checking installed CLI"
 "$BIN" abi
 okay "CLI is ready"
 
-# Make it runnable without a fresh shell knowing $INSTALL_DIR: append a PATH
-# line once, the same idempotent pattern rustup/deno use, rather than
-# requiring the caller to edit their shell rc by hand.
+# Persist the path silently for later terminals. The public install command
+# also exports it in the current terminal, so setup remains a two-command flow.
 PATH_LINE="export PATH=\"$INSTALL_DIR/bin:\$PATH\""
 RC_FILE=""
 case "${SHELL:-}" in
@@ -130,13 +129,9 @@ case "${SHELL:-}" in
   */bash) RC_FILE="$HOME/.bashrc" ;;
 esac
 
-if [ -n "$RC_FILE" ] && [ -f "$RC_FILE" ] && ! grep -qF "$INSTALL_DIR/bin" "$RC_FILE" 2>/dev/null; then
+if [ -n "$RC_FILE" ] && ! grep -qF "$INSTALL_DIR/bin" "$RC_FILE" 2>/dev/null; then
+  touch "$RC_FILE"
   printf '\n# added by harness-kernel install.sh\n%s\n' "$PATH_LINE" >> "$RC_FILE"
-  echo "== added $INSTALL_DIR/bin to PATH in $RC_FILE (restart your shell, or run: $PATH_LINE)"
-else
-  echo "== add this to your shell profile: $PATH_LINE"
 fi
 
 printf '\n%b\n' "${GREEN}✓ Installed Rearguard CLI ${RELEASE_VERSION}${RESET} ${DIM}($TARGET)${RESET}"
-printf '%b\n' "  Pair now: ${CYAN}${BIN} connect${RESET}"
-printf '%b\n' "  In a new terminal, use: ${CYAN}rearguard connect${RESET}"

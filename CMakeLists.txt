@@ -16,7 +16,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(harness_kernel
-        VERSION 0.3.4
+        VERSION 0.3.5
         DESCRIPTION "Physical AI harness kernel (v2 — schema-driven)"
         LANGUAGES CXX C)
 

@@ -749,6 +749,7 @@ void print_usage() {
                   "  rearguard diff <a.mcap> <b.mcap> [--json]\n"
                   "  rearguard abi\n"
                   "  rearguard connect [--name <device-name>] [--json]\n"
+                  "  rearguard scan <setup|runtime> [options]\n"
                   "  rearguard observe <start|profile|status|capture|windows|promote|proposals> [options]\n"
                   "  rearguard workflow <init|show|outbox|artifact|apply|export-window|generation-request> [options]\n"
                   "  rearguard uninstall [--prefix <dir>] [--dry-run] [--yes] [--json]\n");
@@ -781,7 +782,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    if (cmd == "observe" || cmd == "workflow") {
+    if (cmd == "scan" || cmd == "observe" || cmd == "workflow") {
         return harness::observation::command_main(cmd, argc - 2, argv + 2);
     }
 
@@ -958,6 +959,9 @@ int main(int argc, char** argv) {
     }
 
     std::fprintf(stderr, "error: unknown command '%s'\n", cmd.c_str());
+    if (cmd == "conect") {
+        std::fprintf(stderr, "hint: did you mean 'rearguard connect'?\n");
+    }
     print_usage();
     return 1;
 }
