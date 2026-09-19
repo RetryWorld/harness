@@ -61,7 +61,17 @@ jobs:
       - name: Build, test, package
         run: |
           source /opt/ros/jazzy/setup.bash
-          HARNESS_WITH_ROS2=ON ./scripts/build_artifact.sh "${GITHUB_REF_NAME#v}"
+          build_log="${RUNNER_TEMP}/rearguard-release-build.log"
+          if ! HARNESS_WITH_ROS2=ON ./scripts/build_artifact.sh "${GITHUB_REF_NAME#v}" >"${build_log}" 2>&1; then
+            cat "${build_log}"
+            failure="$(tail -c 60000 "${build_log}")"
+            failure="${failure//'%'/'%25'}"
+            failure="${failure//$'\r'/'%0D'}"
+            failure="${failure//$'\n'/'%0A'}"
+            echo "::error title=ROS-enabled release build failed::${failure}"
+            exit 1
+          fi
+          cat "${build_log}"
 
       - uses: actions/upload-artifact@v4
         with:

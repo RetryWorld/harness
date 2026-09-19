@@ -2,10 +2,13 @@
 #include "evidence.hpp"
 #include "recording.hpp"
 #include "runtime.hpp"
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <deque>
 #include <fcntl.h>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialization.hpp>
@@ -17,7 +20,6 @@
 #include <sys/file.h>
 #include <sys/utsname.h>
 #include <thread>
-#include <future>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 #include <unistd.h>
 
@@ -465,7 +467,9 @@ public:
       event("observer_started", {{"session", session_.string()},
                                  {"critics", Json::array()},
                                  {"recoveries", Json::array()}});
-      rclcpp::executors::SingleThreadedExecutor executor;
+      rclcpp::ExecutorOptions executor_options;
+      executor_options.context = context_;
+      rclcpp::executors::SingleThreadedExecutor executor(executor_options);
       executor.add_node(node_);
       while (rclcpp::ok(context_) &&
              static_cast<double>(monotonic_ns() - started) / 1e9 <
@@ -523,7 +527,9 @@ Json discover_domain(Ns domain, Ns settle_ms) {
   // DDS discovery is asynchronous. This is a single bounded wait, never a
   // ros2 CLI subprocess per artifact. The graph is then copied in one pass.
   const auto deadline = monotonic_ns() + settle_ms * 1000000LL;
-  rclcpp::executors::SingleThreadedExecutor executor;
+  rclcpp::ExecutorOptions executor_options;
+  executor_options.context = context.value;
+  rclcpp::executors::SingleThreadedExecutor executor(executor_options);
   executor.add_node(node);
   while (rclcpp::ok(context.value) && monotonic_ns() < deadline)
     executor.spin_once(std::chrono::milliseconds(25));
@@ -769,7 +775,9 @@ Json ros_request(const Options &options, const Json &meta) {
         }
       });
   auto publisher = node->create_publisher<String>(prefix + "/requests", 10);
-  rclcpp::executors::SingleThreadedExecutor executor;
+  rclcpp::ExecutorOptions executor_options;
+  executor_options.context = context.value;
+  rclcpp::executors::SingleThreadedExecutor executor(executor_options);
   executor.add_node(node);
   const auto deadline = monotonic_ns() + 15000000000LL;
   Ns next_send = 0;
