@@ -108,9 +108,11 @@ void live_test(const fs::path &root) {
                   "30"});
   rclcpp::InitOptions init;
   init.set_domain_id(static_cast<std::size_t>(domain));
-  const char *ros_argv[] = {"harness_observation_ros_tests"};
-  rclcpp::init(1, ros_argv, init);
-  auto node = std::make_shared<rclcpp::Node>("native_observation_fixture");
+  auto context = std::make_shared<rclcpp::Context>();
+  context->init(0, nullptr, init);
+  rclcpp::NodeOptions node_options;
+  node_options.context(context);
+  auto node = std::make_shared<rclcpp::Node>("native_observation_fixture", node_options);
   auto joints =
       node->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
   auto actions = node->create_publisher<std_msgs::msg::Float64MultiArray>(
@@ -119,7 +121,9 @@ void live_test(const fs::path &root) {
       "/camera/image_raw", rclcpp::SensorDataQoS());
   auto wrist = node->create_publisher<sensor_msgs::msg::Image>(
       "/wrist_camera/image_raw", rclcpp::SensorDataQoS());
-  rclcpp::executors::SingleThreadedExecutor executor;
+  rclcpp::ExecutorOptions executor_options;
+  executor_options.context = context;
+  rclcpp::executors::SingleThreadedExecutor executor(executor_options);
   executor.add_node(node);
   auto publish = [&] {
     sensor_msgs::msg::JointState j;
@@ -194,7 +198,7 @@ void live_test(const fs::path &root) {
       store.snapshot()["candidates"].begin().value()["evidence"]["sha256"] ==
           artifact["sha256"],
       "live evidence not attached");
-  rclcpp::shutdown();
+  context->shutdown("test complete");
 }
 } // namespace
 int main(int argc, char **) {
