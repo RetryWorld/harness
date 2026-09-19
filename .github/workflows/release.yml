@@ -64,11 +64,14 @@ jobs:
           build_log="${RUNNER_TEMP}/rearguard-release-build.log"
           if ! HARNESS_WITH_ROS2=ON ./scripts/build_artifact.sh "${GITHUB_REF_NAME#v}" >"${build_log}" 2>&1; then
             cat "${build_log}"
-            failure="$(tail -c 60000 "${build_log}")"
-            failure="${failure//'%'/'%25'}"
-            failure="${failure//$'\r'/'%0D'}"
-            failure="${failure//$'\n'/'%0A'}"
-            echo "::error title=ROS-enabled release build failed::${failure}"
+            grep -E 'FAILED:|fatal error:|error:|CMake Error|tests failed|ninja: build stopped' "${build_log}" |
+              tail -20 |
+              while IFS= read -r failure; do
+                failure="${failure//'%'/'%25'}"
+                failure="${failure//$'\r'/'%0D'}"
+                failure="${failure//$'\n'/'%0A'}"
+                echo "::error title=ROS-enabled release build failed::${failure}"
+              done
             exit 1
           fi
           cat "${build_log}"
