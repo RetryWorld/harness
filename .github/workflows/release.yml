@@ -37,6 +37,7 @@ jobs:
       - uses: bufbuild/buf-setup-action@v1
         with:
           version: ${{ env.BUF_VERSION }}
+          github_token: ${{ github.token }}
 
       - uses: ros-tooling/setup-ros@v0.7
         with:

@@ -40,6 +40,7 @@ jobs:
       - uses: bufbuild/buf-setup-action@v1
         with:
           version: ${{ env.BUF_VERSION }}
+          github_token: ${{ github.token }}
 
       - name: Install protoc
         run: |
@@ -133,6 +134,7 @@ jobs:
       - uses: bufbuild/buf-setup-action@v1
         with:
           version: ${{ env.BUF_VERSION }}
+          github_token: ${{ github.token }}
 
       - uses: actions/setup-node@v4
         with:
@@ -175,6 +177,7 @@ jobs:
       - uses: bufbuild/buf-setup-action@v1
         with:
           version: ${{ env.BUF_VERSION }}
+          github_token: ${{ github.token }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -215,6 +218,7 @@ jobs:
       - uses: bufbuild/buf-setup-action@v1
         with:
           version: ${{ env.BUF_VERSION }}
+          github_token: ${{ github.token }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -264,6 +268,7 @@ jobs:
       - uses: bufbuild/buf-setup-action@v1
         with:
           version: ${{ env.BUF_VERSION }}
+          github_token: ${{ github.token }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
