@@ -12,8 +12,12 @@ public:
   fs::path verify_artifact(const Json &reference,
                            const std::string &kind) const;
   Json apply(const Json &request) const;
+  Json apply_remote(const Json &request) const;
+  Json pending_sync_receipts() const;
+  void acknowledge_sync_receipts(const Json &receipts) const;
 
 private:
+  Json apply_internal(const Json &request, bool queue_sync_receipt) const;
   Json transition(Json &state, const std::string &operation,
                   const Json &payload, const std::string &actor) const;
 };

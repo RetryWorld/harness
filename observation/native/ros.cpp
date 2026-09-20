@@ -13,6 +13,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialization.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <set>
 #include <std_msgs/msg/float64_multi_array.hpp>
@@ -28,10 +29,11 @@ namespace {
 using String = std_msgs::msg::String;
 struct RosContext {
   rclcpp::Context::SharedPtr value = std::make_shared<rclcpp::Context>();
-  explicit RosContext(Ns domain) {
+  explicit RosContext(Ns domain, bool initialize_logging = true) {
     require(domain >= 0 && domain <= 232, "domain-id must be within 0..232");
     rclcpp::InitOptions init;
     init.set_domain_id(static_cast<std::size_t>(domain));
+    init.auto_initialize_logging(initialize_logging);
     value->init(0, nullptr, init);
   }
   ~RosContext() {
@@ -518,7 +520,10 @@ Json ros_start(const Options &options) {
   return nullptr;
 }
 Json discover_domain(Ns domain, Ns settle_ms) {
-  RosContext context(domain);
+  // Setup discovery creates many short-lived contexts in parallel. ROS logging
+  // is process-global, so initializing it from each context produces a warning
+  // for every probed domain. The scanner does not emit ROS log records.
+  RosContext context(domain, false);
   const auto scanner_name = "harness_setup_scan_" + unique_id().substr(0, 8);
   rclcpp::NodeOptions node_options;
   node_options.context(context.value);
@@ -600,6 +605,125 @@ Json discover_domain(Ns domain, Ns settle_ms) {
   std::sort(topics.begin(), topics.end(), [](const Json &a, const Json &b) {
     return a.at("name") < b.at("name");
   });
+
+  // One bounded, passive capture per topic. Never call services or send goals.
+  // Keep previews small enough for the setup inventory transport.
+  std::vector<rclcpp::GenericSubscription::SharedPtr> sample_subscriptions;
+  std::size_t sample_budget = 2 * 1024 * 1024;
+  std::size_t camera_sample_budget = 16 * 1024 * 1024;
+  const auto hex = [](const std::uint8_t *bytes, std::size_t length) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(length * 2);
+    for (std::size_t i = 0; i < length; ++i) {
+      result.push_back(digits[bytes[i] >> 4]);
+      result.push_back(digits[bytes[i] & 15]);
+    }
+    return result;
+  };
+  for (std::size_t index = 0; index < topics.size(); ++index) {
+    auto &topic = topics[index];
+    topic["sample"] = {{"status", "timeout"}};
+    if (topic["types"].size() != 1 || topic["publishers"].empty()) {
+      topic["sample"] = {{"status", "unavailable"},
+                         {"error", "Requires one unambiguous type and a publisher."}};
+      continue;
+    }
+    const auto type = topic["types"][0].get<std::string>();
+    try {
+      sample_subscriptions.push_back(node->create_generic_subscription(
+          topic["name"].get<std::string>(), type,
+          rclcpp::QoS(1).best_effort().durability_volatile(),
+          [&, index, type](std::shared_ptr<rclcpp::SerializedMessage> message) {
+            auto &sample = topics[index]["sample"];
+            if (sample["status"] != "timeout") return;
+            const auto &bytes = message->get_rcl_serialized_message();
+            auto &budget = type == "sensor_msgs/msg/Image" ||
+                                   type == "sensor_msgs/msg/CompressedImage"
+                               ? camera_sample_budget
+                               : sample_budget;
+            if (budget < 1024 || bytes.buffer_length > 32 * 1024 * 1024) {
+              sample = {{"status", "unavailable"}, {"error", "Setup sample size limit reached."}};
+              return;
+            }
+            sample = {{"status", "captured"}, {"captured_wall_ns", wall_ns()},
+                      {"byte_length", bytes.buffer_length}};
+            try {
+              if (type == "sensor_msgs/msg/Image") {
+                const auto frame = decode<sensor_msgs::msg::Image>(*message);
+                sample["data"] = {{"width", frame.width}, {"height", frame.height},
+                                  {"encoding", frame.encoding}, {"step", frame.step},
+                                  {"frame_id", frame.header.frame_id}};
+                const bool mono = frame.encoding == "mono8";
+                const bool bgr = frame.encoding == "bgr8" || frame.encoding == "bgra8";
+                const std::size_t channels = mono ? 1 :
+                    (frame.encoding == "rgba8" || frame.encoding == "bgra8" ? 4 : 3);
+                const bool supported = mono || bgr || frame.encoding == "rgb8" || frame.encoding == "rgba8";
+                if (supported && frame.width && frame.height &&
+                    frame.step >= static_cast<std::size_t>(frame.width) * channels &&
+                    frame.data.size() >= static_cast<std::size_t>(frame.step) * frame.height &&
+                    budget >= 320 * 240 * 6 + 1024) {
+                  const auto scale = std::max({1U, (frame.width + 319) / 320, (frame.height + 239) / 240});
+                  const auto width = (frame.width + scale - 1) / scale;
+                  const auto height = (frame.height + scale - 1) / scale;
+                  std::vector<std::uint8_t> rgb;
+                  rgb.reserve(width * height * 3);
+                  for (std::uint32_t y = 0; y < height; ++y)
+                    for (std::uint32_t x = 0; x < width; ++x) {
+                      const auto offset = static_cast<std::size_t>(y * scale) * frame.step + x * scale * channels;
+                      rgb.push_back(frame.data[offset + (mono ? 0 : bgr ? 2 : 0)]);
+                      rgb.push_back(frame.data[offset + (mono ? 0 : 1)]);
+                      rgb.push_back(frame.data[offset + (mono ? 0 : bgr ? 0 : 2)]);
+                    }
+                  sample["image"] = {{"width", width}, {"height", height},
+                                     {"rgb_hex", hex(rgb.data(), rgb.size())}};
+                }
+              } else if (type == "sensor_msgs/msg/CompressedImage") {
+                const auto frame = decode<sensor_msgs::msg::CompressedImage>(*message);
+                sample["data"] = {{"format", frame.format},
+                                  {"frame_id", frame.header.frame_id}};
+                if (frame.data.size() <= 2 * 1024 * 1024 &&
+                    budget >= frame.data.size() * 2 + 1024)
+                  sample["compressed_image"] = {
+                      {"format", frame.format},
+                      {"data_hex", hex(frame.data.data(), frame.data.size())}};
+              } else if (type == "sensor_msgs/msg/JointState") {
+                const auto state = decode<sensor_msgs::msg::JointState>(*message);
+                sample["data"] = {{"name", state.name}, {"position", state.position},
+                                  {"velocity", state.velocity}, {"effort", state.effort}};
+              } else if (type == "std_msgs/msg/String") {
+                const auto value = decode<String>(*message).data;
+                sample["data"] = value.substr(0, 4096);
+                sample["truncated"] = value.size() > 4096;
+              }
+            } catch (const std::exception &error) {
+              sample["error"] = error.what();
+            }
+            if (!sample.contains("data") || type == "sensor_msgs/msg/Image") {
+              const auto length = std::min<std::size_t>(bytes.buffer_length, 4096);
+              sample["cdr_hex"] = hex(bytes.buffer, length);
+              sample["truncated"] = length < bytes.buffer_length;
+            }
+            const auto size = sample.dump().size();
+            if (size > budget) {
+              sample = {{"status", "unavailable"}, {"error", "Setup sample size limit reached."}};
+            } else {
+              budget -= size;
+            }
+          }));
+    } catch (const std::exception &error) {
+      topic["sample"] = {{"status", "unavailable"}, {"error", error.what()}};
+    }
+  }
+  const auto sample_deadline = monotonic_ns() + 1500000000LL;
+  while (!sample_subscriptions.empty() && rclcpp::ok(context.value) &&
+         monotonic_ns() < sample_deadline) {
+    executor.spin_once(std::chrono::milliseconds(25));
+    if (std::none_of(topics.begin(), topics.end(), [](const Json &topic) {
+          return topic["sample"]["status"] == "timeout";
+        })) break;
+  }
+  sample_subscriptions.clear();
 
   Json services = Json::array();
   std::map<std::string, Json> action_services;

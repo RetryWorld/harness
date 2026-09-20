@@ -7,6 +7,7 @@
 namespace harness::cli {
 inline constexpr char kDefaultSupabaseUrl[] = "https://dqyjpizwaldtoqpbrarp.supabase.co";
 inline constexpr char kDefaultSupabaseAnonKey[] = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRxeWpwaXp3YWxkdG9xcGJyYXJwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk3NTIzNTksImV4cCI6MjEwNTMyODM1OX0.hT_M6wlfcioCd6T-12aoczN4MF1lphGdUTL19QFZrME";
+inline constexpr char kDefaultBackendUrl[] = "https://info-32291--api.modal.run";
 }
 
 #endif

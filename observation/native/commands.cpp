@@ -1,10 +1,13 @@
 #include "common.hpp"
 #include "store.hpp"
+#include "sync.hpp"
 #include <iostream>
 namespace harness::observation {
 namespace {
 Json workflow(const Options &o) {
   const auto root = o.path("--store");
+  if (o.command == "sync" || o.command == "sync-once")
+    return run_workflow_sync(o, o.command == "sync-once");
   if (o.command == "init") {
     o.allow("--store --config");
     return Store::create(root, o.need("--config")).snapshot();
@@ -173,10 +176,10 @@ int command_main(const std::string &group, int argc, char **argv) {
               ? std::map<
                     std::string,
                     std::string>{{"start",
-                                  "--config FILE --session DIR [--store DIR] "
+                                  "--config FILE|so101 --session DIR [--store DIR] "
                                   "[--storage mcap|sqlite3] [--domain-id 71] "
                                   "[--wall-timeout 1800]"},
-                                 {"profile", "--config FILE | --session DIR"},
+                                 {"profile", "--config FILE|so101 | --session DIR"},
                                  {"status", "--session DIR"},
                                  {"windows", "--session DIR"},
                                  {"proposals", "--session DIR"},
@@ -195,11 +198,11 @@ int command_main(const std::string &group, int argc, char **argv) {
                           {"setup", "[--domain-min 0] [--domain-max 232] "
                                     "[--settle-ms 750] [--parallelism 16] "
                                     "[--out inventory.json]"},
-                          {"runtime", "--config FILE --session DIR [--store "
+                          {"runtime", "--config FILE|so101 --session DIR [--store "
                                       "DIR] [--storage mcap|sqlite3] "
                                       "--domain-id N [--wall-timeout 1800]"}}
                     : std::map<std::string, std::string>{
-                    {"init", "--store DIR --config FILE"},
+                    {"init", "--store DIR --config FILE|so101"},
                     {"show", "--store DIR"},
                     {"outbox", "--store DIR [--after 0]"},
                     {"artifact", "--store DIR --kind "
@@ -210,7 +213,11 @@ int command_main(const std::string &group, int argc, char **argv) {
                      "--expected-revision N [--request-id ID]"},
                     {"export-window",
                      "--store DIR --session DIR --candidate ID"},
-                    {"generation-request", "--store DIR --job ID --out DIR"}};
+                    {"generation-request", "--store DIR --job ID --out DIR"},
+                    {"sync", "--store DIR --robot-id UUID [--credentials FILE] "
+                             "[--backend-url URL] [--interval-ms 2000]"},
+                    {"sync-once", "--store DIR --robot-id UUID [--credentials FILE] "
+                                  "[--backend-url URL] [--interval-ms 2000]"}};
       require(usage.contains(argv[0]), "unknown subcommand");
       std::cout << "rearguard " << group << ' ' << argv[0] << ' '
                 << usage.at(argv[0]) << '\n';
@@ -223,7 +230,7 @@ int command_main(const std::string &group, int argc, char **argv) {
                                    "capture|candidate|promote|activate>\n"
               : group == "scan" ? " <setup|runtime>\n"
                                  : " <init|show|outbox|artifact|apply|export-"
-                                   "window|generation-request>\n")
+                                   "window|generation-request|sync|sync-once>\n")
           << "See edge/observation/README.md and WORKFLOW.md for options.\n";
       return argc == 0 ? 1 : 0;
     }

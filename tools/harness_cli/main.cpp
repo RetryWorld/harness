@@ -752,7 +752,7 @@ void print_usage() {
                   "[--scan-parallelism 16] [--json]\n"
                   "  rearguard scan <setup|runtime> [options]\n"
                   "  rearguard observe <start|profile|status|capture|windows|promote|proposals> [options]\n"
-                  "  rearguard workflow <init|show|outbox|artifact|apply|export-window|generation-request> [options]\n"
+                  "  rearguard workflow <init|show|outbox|artifact|apply|export-window|generation-request|sync|sync-once> [options]\n"
                   "  rearguard uninstall [--prefix <dir>] [--dry-run] [--yes] [--json]\n");
 }
 

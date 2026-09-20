@@ -53,6 +53,19 @@ snapshot also includes ROS middleware metadata and basic host capacity. With
 `--out`, the versioned JSON snapshot is written atomically. It requires a
 ROS-enabled build.
 
+Each discovered domain also gets a bounded 1.5-second passive capture window.
+The first received message for each topic is frozen in its `sample` field;
+subscriptions are destroyed at the end of the window. Silent topics report
+`timeout`, and missing type support or size limits report `unavailable`.
+Common raw camera encodings (`rgb8`, `bgr8`, `rgba8`, `bgra8`, `mono8`) include
+an RGB preview up to 320 × 240. Compressed camera messages retain JPEG or PNG
+frames up to 2 MiB for the same one-shot preview. Camera samples use a separate
+16 MiB preview budget so ordinary topic samples cannot crowd them out. Joint
+states and strings include decoded values; other types include up to 4 KiB of
+CDR bytes as hex and share a 2 MiB budget per domain. Services and actions are
+inventoried, never invoked; controller surfaces are not runtime controller-state queries.
+Existing stored scans remain metadata-only until a new scan runs with this client.
+
 `scan runtime` is the high-rate data-plane command. It uses the native
 observer's direct subscriptions and rosbag2/MCAP writer; it does not poll ROS
 CLI commands and does not reread MCAP for each inference. It is intentionally
@@ -62,6 +75,37 @@ session is pinned to one of the domains returned by the setup scan.
 
 The architecture and durable profile-sync contract are in
 [`strategy/ros-scanning-and-profile-sync.md`](../../../strategy/ros-scanning-and-profile-sync.md).
+
+### `workflow sync` / `workflow sync-once`
+
+`workflow sync` is the native C++ edge connector for the persistent failure
+and recovery workflow. It watches the canonical SQLite store, uploads new
+profile revisions through the Rearguard backend, polls web commands, applies
+them with the same revision and idempotency checks as local workflow commands,
+and reports applied or rejected receipts with the resulting snapshot.
+
+```bash
+rearguard workflow sync --store edge-profiles/so101 \
+  --robot-id 00000000-0000-0000-0000-000000000000
+```
+
+It uses the credential created by `rearguard connect`. `sync-once` runs one
+deterministic cycle for diagnostics. Network work remains outside ROS callbacks
+and SQLite profile transactions; a restart safely resends the full latest
+snapshot. Applied and rejected command receipts remain durable until upload,
+while request IDs make successfully applied commands idempotent.
+
+Installed clients can refer to the packaged robot binding by name, without a
+source checkout:
+
+```bash
+STORE="${XDG_STATE_HOME:-$HOME/.local/state}/rearguard/profiles/so101"
+rearguard workflow init --store "$STORE" --config so101
+```
+
+The CLI resolves `so101` to the installation's
+`share/harness/observation/so101.json`. Set
+`REARGUARD_OBSERVATION_CONFIG_DIR` to override the packaged config directory.
 
 ## Where the binary comes from
 

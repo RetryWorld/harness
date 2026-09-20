@@ -1,4 +1,5 @@
 #include "store.hpp"
+#include <algorithm>
 #include <cmath>
 #include <fcntl.h>
 #include <fstream>
@@ -79,6 +80,22 @@ void range(const Json &v, double lower, double upper, const std::string &name) {
 Store::Store(fs::path directory) : root(fs::absolute(std::move(directory))) {
   require(fs::is_regular_file(root / "workflow.sqlite3"),
           "workflow store missing; run workflow init first");
+  Database db(root / "workflow.sqlite3");
+  db.exec("CREATE TABLE IF NOT EXISTS sync_receipts(id TEXT PRIMARY KEY, "
+          "body TEXT NOT NULL)");
+  auto state = observation::snapshot(db);
+  if (state.contains("placeholders") && state["placeholders"].is_array()) {
+    auto &placeholders = state["placeholders"];
+    const auto original_size = placeholders.size();
+    placeholders.erase(
+        std::remove(placeholders.begin(), placeholders.end(), "database_sync"),
+        placeholders.end());
+    if (placeholders.size() != original_size) {
+      Statement update(db, "UPDATE profile SET body=? WHERE id=1");
+      update.bind(1, encoded(state));
+      update.next();
+    }
+  }
 }
 Store Store::create(const fs::path &directory, const fs::path &config) {
   auto binding = load_config(config);
@@ -100,13 +117,14 @@ Store Store::create(const fs::path &directory, const fs::path &config) {
                 {"installed_deployment", nullptr},
                 {"enforcement_status", "unavailable"},
                 {"placeholders",
-                 {"database_sync", "critic_inference", "recovery_controller"}}};
+                 {"critic_inference", "recovery_controller"}}};
   Database db(path);
   db.exec(
       "PRAGMA journal_mode=WAL; CREATE TABLE profile(id INTEGER PRIMARY KEY "
       "CHECK(id=1), body TEXT NOT NULL); CREATE TABLE receipts(id TEXT PRIMARY "
       "KEY, request_hash TEXT NOT NULL, response TEXT NOT NULL); CREATE TABLE "
-      "outbox(seq INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL);");
+      "outbox(seq INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL); "
+      "CREATE TABLE sync_receipts(id TEXT PRIMARY KEY, body TEXT NOT NULL);");
   db.exec("BEGIN IMMEDIATE");
   Statement q(db, "INSERT INTO profile VALUES(1, ?)");
   q.bind(1, encoded(state));
@@ -201,6 +219,51 @@ fs::path Store::verify_artifact(const Json &reference,
   return path;
 }
 Json Store::apply(const Json &request) const {
+  return apply_internal(request, false);
+}
+Json Store::apply_remote(const Json &request) const {
+  const auto id = required_text(request.at("request_id"), "request_id");
+  try {
+    const auto response = apply_internal(request, true);
+    return {{"request_id", id}, {"status", "applied"}, {"result", response}};
+  } catch (const std::exception &error) {
+    std::string message = error.what();
+    if (message.size() > 2000) message.resize(2000);
+    Json receipt =
+        {{"request_id", id}, {"status", "rejected"}, {"error", message}};
+    Database db(root / "workflow.sqlite3");
+    Statement save(db, "INSERT INTO sync_receipts VALUES(?,?) ON CONFLICT(id) "
+                       "DO UPDATE SET body=excluded.body");
+    save.bind(1, id);
+    save.bind(2, encoded(receipt));
+    save.next();
+    return receipt;
+  }
+}
+Json Store::pending_sync_receipts() const {
+  Database db(root / "workflow.sqlite3");
+  Statement query(db, "SELECT body FROM sync_receipts ORDER BY rowid LIMIT 100");
+  auto receipts = Json::array();
+  while (query.next()) receipts.push_back(Json::parse(query.text(0)));
+  return receipts;
+}
+void Store::acknowledge_sync_receipts(const Json &receipts) const {
+  require(receipts.is_array(), "sync receipts must be an array");
+  Database db(root / "workflow.sqlite3");
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    for (const auto &receipt : receipts) {
+      Statement remove(db, "DELETE FROM sync_receipts WHERE id=?");
+      remove.bind(1, required_text(receipt.at("request_id"), "request_id"));
+      remove.next();
+    }
+    db.exec("COMMIT");
+  } catch (...) {
+    db.exec("ROLLBACK");
+    throw;
+  }
+}
+Json Store::apply_internal(const Json &request, bool queue_sync_receipt) const {
   require(request.is_object() && request.value("schema_version", 0) == 1,
           "request requires schema_version 1");
   const auto id = required_text(request.at("request_id"), "request_id");
@@ -219,6 +282,16 @@ Json Store::apply(const Json &request) const {
       require(receipt.text(0) == hash,
               "request_id already used for different content");
       auto response = Json::parse(receipt.text(1));
+      if (queue_sync_receipt) {
+        const Json sync_receipt = {{"request_id", id},
+                                   {"status", "applied"},
+                                   {"result", response}};
+        Statement sync(db, "INSERT INTO sync_receipts VALUES(?,?) ON "
+                           "CONFLICT(id) DO UPDATE SET body=excluded.body");
+        sync.bind(1, id);
+        sync.bind(2, encoded(sync_receipt));
+        sync.next();
+      }
       db.exec("COMMIT");
       return response;
     }
@@ -252,6 +325,15 @@ Json Store::apply(const Json &request) const {
     save.bind(2, hash);
     save.bind(3, encoded(response));
     save.next();
+    if (queue_sync_receipt) {
+      const Json sync_receipt = {{"request_id", id},
+                                 {"status", "applied"},
+                                 {"result", response}};
+      Statement sync(db, "INSERT INTO sync_receipts VALUES(?,?)");
+      sync.bind(1, id);
+      sync.bind(2, encoded(sync_receipt));
+      sync.next();
+    }
     db.exec("COMMIT");
     return response;
   } catch (...) {

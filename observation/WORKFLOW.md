@@ -27,23 +27,19 @@ realtime gating, fallback and policy reentry for the associated controller.
 
 ## Start a persistent profile and a recording session
 
-Build the updated local source on Linux after transferring it yourself:
+For an installed edge client, no repository checkout or `edge/` directory is
+required:
 
 ```bash
-cd ~/retry.world
 source /opt/ros/jazzy/setup.bash
-sudo apt-get install -y nlohmann-json3-dev libsqlite3-dev libssl-dev ros-jazzy-rosbag2-storage-mcap
-cmake -S edge -B edge/build -DHARNESS_WITH_ROS2=ON -DHARNESS_BUILD_TESTS=ON
-cmake --build edge/build -j 2
-ctest --test-dir edge/build --output-on-failure
 export ROS_DOMAIN_ID=71
 export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
-CLI="$PWD/edge/build/rearguard"
-STORE="$PWD/edge-profiles/so101"
+STORE="${XDG_STATE_HOME:-$HOME/.local/state}/rearguard/profiles/so101"
 SESSION=/tmp/so101-workflow-01
+ROBOT_ID=REPLACE_WITH_THE_ROBOT_UUID_FROM_THE_WEB_URL
 
-"$CLI" workflow init --store "$STORE" --config edge/observation/so101.json
-"$CLI" observe start --config edge/observation/so101.json \
+rearguard workflow init --store "$STORE" --config so101
+rearguard observe start --config so101 \
   --store "$STORE" --session "$SESSION" --domain-id 71 --storage mcap
 ```
 
@@ -53,6 +49,24 @@ must set their own `CLI`, `STORE`, `SESSION` and ROS environment. The default
 recording format is now MCAP and needs the ROS 2 MCAP storage plugin. If it is
 unavailable, `--storage sqlite3` permits recording, but exporting a window to
 MCAP still requires that plugin. No format fallback happens silently.
+
+In a separate terminal, start the native workflow connector against the same
+store. It reads the paired-device credential written by `rearguard connect`,
+uploads new canonical profile revisions, polls revision-bound web commands,
+applies them through the transactional store and reports receipts:
+
+```bash
+rearguard workflow sync --store "$STORE" --robot-id "$ROBOT_ID"
+```
+
+`workflow sync-once` performs one upload/poll/apply cycle for diagnostics and
+automation. `--credentials FILE` overrides the default
+`~/.config/rearguard/device.json`; `--backend-url URL` targets a different
+HTTPS backend. The long-running connector sends a heartbeat snapshot every 30
+seconds, retries failures with bounded backoff and stops cleanly on Ctrl-C.
+Command receipts remain in the local SQLite store until an HTTPS upload
+succeeds, so a disconnect or process restart after local application cannot
+lose the backend acknowledgement.
 
 Run Foxglove, SO-101 and perturbations as in the existing walkthrough. No
 Gazebo poses or perturbation events are passed to the critic adapter. It

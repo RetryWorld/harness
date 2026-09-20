@@ -3,6 +3,7 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <fcntl.h>
 #include <fstream>
 #include <iomanip>
@@ -140,6 +141,32 @@ Json read_json(const fs::path &path) {
   require(stream.good(), "cannot read " + path.string());
   return Json::parse(stream);
 }
+namespace {
+fs::path observation_config_path(const fs::path &requested) {
+  if (fs::is_regular_file(requested)) return requested;
+  if (requested.has_parent_path()) return requested;
+
+  auto filename = requested;
+  if (filename.extension().empty()) filename += ".json";
+  if (const auto *directory = std::getenv("REARGUARD_OBSERVATION_CONFIG_DIR")) {
+    const auto candidate = fs::path(directory) / filename;
+    if (fs::is_regular_file(candidate)) return candidate;
+  }
+#if defined(__linux__)
+  std::array<char, 4096> executable{};
+  const auto size =
+      ::readlink("/proc/self/exe", executable.data(), executable.size() - 1);
+  if (size > 0) {
+    executable[static_cast<std::size_t>(size)] = '\0';
+    const auto prefix = fs::path(executable.data()).parent_path().parent_path();
+    const auto candidate =
+        prefix / "share" / "harness" / "observation" / filename;
+    if (fs::is_regular_file(candidate)) return candidate;
+  }
+#endif
+  return requested;
+}
+} // namespace
 void atomic_json(const fs::path &path, const Json &value) {
   const fs::path temporary = path.string() + "." + unique_id() + ".tmp";
   const int fd = ::open(temporary.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
@@ -171,7 +198,7 @@ std::string required_text(const Json &value, const std::string &name) {
   return text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
 }
 Json load_config(const fs::path &path) {
-  auto c = read_json(path);
+  auto c = read_json(observation_config_path(path));
   require(c.value("schema_version", 0) == 1 &&
               c.value("mode", "") == "observation_only",
           "requires observation_only configuration, schema_version 1");

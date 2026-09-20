@@ -16,7 +16,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(harness_kernel
-        VERSION 0.3.6
+        VERSION 0.3.8
         DESCRIPTION "Physical AI harness kernel (v2 — schema-driven)"
         LANGUAGES CXX C)
 
@@ -225,11 +225,11 @@ endif()
 option(HARNESS_WITH_ROS2 "Build native ROS 2 observation and MCAP export (source Jazzy first)" OFF)
 add_library(harness_observation STATIC
   observation/native/common.cpp observation/native/store.cpp
-  observation/native/evidence.cpp observation/native/runtime.cpp
+  observation/native/evidence.cpp observation/native/runtime.cpp observation/native/sync.cpp
   observation/native/commands.cpp)
 target_include_directories(harness_observation PUBLIC observation/native)
 target_link_libraries(harness_observation PUBLIC nlohmann_json::nlohmann_json
-  PRIVATE ${HARNESS_SQLITE_TARGET} OpenSSL::Crypto harness_flags)
+  PRIVATE ${HARNESS_SQLITE_TARGET} OpenSSL::Crypto CURL::libcurl harness_flags)
 if(HARNESS_WITH_ROS2)
   find_package(rclcpp REQUIRED)
   find_package(rosbag2_cpp REQUIRED)

@@ -150,7 +150,8 @@ bool report_scan_event(const std::string& api_url, const std::string& anon_key,
                        const std::string& device_id, const std::string& secret,
                        const std::string& scan_id, int sequence, const std::string& state,
                        int progress, const Json& payload, int domain_min = -1,
-                       int domain_max = -1, const std::string& error = {}) {
+                       int domain_max = -1, const std::string& error = {},
+                       bool emit_error = true) {
     Json request{{"p_device_id", device_id},
                  {"p_device_secret", secret},
                  {"p_scan_id", scan_id},
@@ -163,8 +164,10 @@ bool report_scan_event(const std::string& api_url, const std::string& anon_key,
                  {"p_error_message", error.empty() ? Json(nullptr) : Json(error)}};
     const auto result = post_rpc(api_url, anon_key, "report_device_setup_scan", request);
     if (result.status >= 200 && result.status < 300) return true;
-    std::fprintf(stderr, "error: could not stream setup scan event: %s\n",
-                 response_message(result).c_str());
+    if (emit_error) {
+        std::fprintf(stderr, "error: could not stream setup scan event: %s\n",
+                     response_message(result).c_str());
+    }
     return false;
 }
 
@@ -251,7 +254,8 @@ int run_automatic_setup_scan(const ConnectOptions& options, const std::string& a
             const int progress = ((last + 1) * 100) / kDomainCount;
             ++sequence;
             synced = report_scan_event(api_url, anon_key, device_id, secret, scan_id,
-                                       sequence, "scanning", progress, batch, first, last) &&
+                                       sequence, "scanning", progress, batch, first, last,
+                                       {}, synced) &&
                      synced;
             if (options.json) {
                 std::printf("%s\n", Json{{"status", "scan_progress"},
@@ -278,7 +282,8 @@ int run_automatic_setup_scan(const ConnectOptions& options, const std::string& a
         inventory["inventory_hash"] = harness::observation::digest(inventory);
         ++sequence;
         synced = report_scan_event(api_url, anon_key, device_id, secret, scan_id,
-                                   sequence, "completed", 100, inventory) &&
+                                   sequence, "completed", 100, inventory, -1, -1, {},
+                                   synced) &&
                  synced;
         if (options.json) {
             std::printf("%s\n", Json{{"status", "scan_completed"},
@@ -504,7 +509,9 @@ int run_connect(const ConnectOptions& options) {
                                {"device_id", device_id},
                                {"device_name", device_name},
                                {"credential", secret},
-                               {"api_url", api_url}};
+                               {"api_url", api_url},
+                               {"backend_url", getenv_or("REARGUARD_BACKEND_URL",
+                                                         kDefaultBackendUrl)}};
         if (!save_credentials(credentials, credential_path, save_error)) {
             std::fprintf(stderr, "error: paired, but could not save credentials: %s\n",
                          save_error.c_str());

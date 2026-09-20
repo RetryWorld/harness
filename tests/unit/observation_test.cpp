@@ -1,5 +1,7 @@
 #include "evidence.hpp"
 #include "runtime.hpp"
+#include "sync.hpp"
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -136,6 +138,23 @@ struct FakeController final : ControllerAdapter {
   bool resume() override { return resume_ack; }
   bool hold(const std::string &) override { return hold_ack; }
 };
+struct FakeWorkflowTransport final : WorkflowTransport {
+  Json commands = Json::array();
+  std::vector<Json> uploads;
+  bool fail_upload = false;
+  void upload(const std::string &robot_id, const Json &snapshot,
+              const Json &receipts) override {
+    if (fail_upload) throw std::runtime_error("offline");
+    uploads.push_back({{"robot_id", robot_id},
+                       {"snapshot", snapshot},
+                       {"receipts", receipts}});
+  }
+  Json pending(const std::string &) override {
+    const auto result = commands;
+    commands = Json::array();
+    return result;
+  }
+};
 void evidence_tests() {
   const auto config = load_config(HARNESS_OBSERVATION_CONFIG);
   Evidence e(config, "test");
@@ -180,6 +199,91 @@ void evidence_tests() {
   rejects([&] { bad.promote(bad_id, "failure", "operator"); }, "insufficient");
 }
 void workflow_tests() {
+  {
+    const auto config_path = fs::path(HARNESS_OBSERVATION_CONFIG);
+    require(::setenv("REARGUARD_OBSERVATION_CONFIG_DIR",
+                     config_path.parent_path().c_str(), 1) == 0,
+            "could not set config path for test");
+    check(load_config("so101")["schema_version"] == 1,
+          "installed config resolves by logical name");
+    ::unsetenv("REARGUARD_OBSERVATION_CONFIG_DIR");
+  }
+  {
+    Fixture sync;
+    FakeWorkflowTransport transport;
+    WorkflowConnector connector(sync.store,
+                                "00000000-0000-4000-8000-000000000100",
+                                transport);
+    connector.cycle();
+    check(transport.uploads.size() == 1 &&
+              transport.uploads.back()["snapshot"]["revision"] == 0,
+          "connector uploads initial snapshot");
+    connector.cycle();
+    check(transport.uploads.size() == 1,
+          "connector does not duplicate unchanged snapshots");
+    transport.commands.push_back(
+        {{"schema_version", 1},
+         {"request_id", "00000000-0000-4000-8000-000000000001"},
+         {"actor", "web-user"},
+         {"expected_revision", 0},
+         {"operation", "deactivate"},
+         {"payload", {{"reason", "connector test"}}}});
+    const auto applied = connector.cycle();
+    check(applied["commands_received"] == 1 &&
+              transport.uploads.size() == 2 &&
+              transport.uploads.back()["snapshot"]["revision"] == 1 &&
+              transport.uploads.back()["receipts"][0]["status"] == "applied",
+          "connector applies command and uploads receipt with new snapshot");
+    transport.commands.push_back(
+        {{"schema_version", 1},
+         {"request_id", "00000000-0000-4000-8000-000000000002"},
+         {"actor", "web-user"},
+         {"expected_revision", 0},
+         {"operation", "deactivate"},
+         {"payload", {{"reason", "stale command"}}}});
+    connector.cycle();
+    check(transport.uploads.size() == 3 &&
+              transport.uploads.back()["snapshot"]["revision"] == 1 &&
+              transport.uploads.back()["receipts"][0]["status"] == "rejected",
+          "connector rejects stale command without changing profile");
+    transport.commands.push_back(
+        {{"schema_version", 1},
+         {"request_id", "00000000-0000-4000-8000-000000000003"},
+         {"actor", "web-user"},
+         {"expected_revision", 1},
+         {"operation", "deactivate"},
+         {"payload", {{"reason", "offline receipt test"}}}});
+    transport.fail_upload = true;
+    rejects([&] { connector.cycle(); }, "offline");
+    check(sync.store.snapshot()["revision"] == 2 &&
+              sync.store.pending_sync_receipts().size() == 1,
+          "applied command and receipt survive an upload failure");
+    transport.fail_upload = false;
+    connector.cycle();
+    check(transport.uploads.size() == 4 &&
+              transport.uploads.back()["snapshot"]["revision"] == 2 &&
+              transport.uploads.back()["receipts"][0]["request_id"] ==
+                  "00000000-0000-4000-8000-000000000003" &&
+              sync.store.pending_sync_receipts().empty(),
+          "durable command receipt uploads and clears after reconnecting");
+  }
+  {
+    Fixture offline;
+    FakeWorkflowTransport transport;
+    transport.fail_upload = true;
+    WorkflowConnector connector(offline.store,
+                                "00000000-0000-4000-8000-000000000101",
+                                transport);
+    const auto local_profile = offline.store.snapshot();
+    rejects([&] { connector.cycle(); }, "offline");
+    check(offline.store.snapshot() == local_profile,
+          "network failure leaves the local harness unchanged");
+    transport.fail_upload = false;
+    connector.cycle();
+    check(transport.uploads.size() == 1 &&
+              transport.uploads.back()["snapshot"] == local_profile,
+          "connector uploads the retained harness after reconnecting");
+  }
   Fixture f;
   Json retry = {{"schema_version", 1},       {"request_id", "retry"},
                 {"actor", "operator"},       {"expected_revision", 0},

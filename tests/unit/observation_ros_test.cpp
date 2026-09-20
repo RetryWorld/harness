@@ -4,10 +4,12 @@
 #include "store.hpp"
 #include <csignal>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialization.hpp>
 #include <rosbag2_cpp/reader.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <spawn.h>
@@ -94,6 +96,71 @@ struct Child {
     }
   }
 };
+// Runs only with --live, alongside the existing DDS smoke test.
+void setup_snapshot_test() {
+  rclcpp::InitOptions init;
+  init.set_domain_id(98);
+  auto context = std::make_shared<rclcpp::Context>();
+  context->init(0, nullptr, init);
+  rclcpp::NodeOptions node_options;
+  node_options.context(context);
+  auto node = std::make_shared<rclcpp::Node>("setup_snapshot_fixture", node_options);
+  auto camera = node->create_publisher<sensor_msgs::msg::Image>(
+      "/setup_test/camera", rclcpp::SensorDataQoS());
+  auto compressed = node->create_publisher<sensor_msgs::msg::CompressedImage>(
+      "/setup_test/camera/compressed", rclcpp::SensorDataQoS());
+  auto silent = node->create_publisher<std_msgs::msg::String>("/setup_test/silent", 1);
+  auto text = node->create_publisher<std_msgs::msg::String>("/setup_test/text", 1);
+  std::vector<std::string> args = {"setup", "--domain-min", "98", "--domain-max", "98",
+                                   "--settle-ms", "1000", "--parallelism", "1"};
+  std::vector<char *> argv;
+  for (auto &arg : args) argv.push_back(arg.data());
+  Options options(static_cast<int>(argv.size()), argv.data());
+  auto future = std::async(std::launch::async, [&] { return ros_discover(options); });
+  bool sent_first = false;
+  while (future.wait_for(std::chrono::milliseconds(20)) != std::future_status::ready) {
+    sensor_msgs::msg::Image frame;
+    frame.width = 2;
+    frame.height = 1;
+    frame.step = 8; // Padded row, BGR source.
+    frame.encoding = "bgr8";
+    frame.data = {0, 0, 255, 0, 255, 0, 0, 0};
+    camera->publish(frame);
+    sensor_msgs::msg::CompressedImage encoded;
+    encoded.format = "jpeg";
+    encoded.data = {0xff, 0xd8, 0xff, 0xd9};
+    compressed->publish(encoded);
+    if (text->get_subscription_count()) {
+      std_msgs::msg::String value;
+      value.data = sent_first ? "later" : "first";
+      text->publish(value);
+      sent_first = true;
+    }
+  }
+  const auto result = future.get();
+  require(result["domains"].size() == 1, "setup scan missed fixture domain");
+  const auto &domain = result["domains"][0];
+  const auto find = [&](const std::string &name) -> const Json & {
+    for (const auto &topic : domain["topics"])
+      if (topic["name"] == name) return topic["sample"];
+    throw std::runtime_error("missing setup topic: " + name);
+  };
+  const auto &frame = find("/setup_test/camera");
+  require(frame["status"] == "captured", "camera snapshot not captured");
+  require(frame["image"]["rgb_hex"] == "ff000000ff00", "BGR camera preview is incorrect");
+  require(frame["image"]["width"] == 2 && frame["image"]["height"] == 1,
+          "camera snapshot dimensions changed");
+  const auto &encoded = find("/setup_test/camera/compressed");
+  require(encoded["compressed_image"]["format"] == "jpeg" &&
+              encoded["compressed_image"]["data_hex"] == "ffd8ffd9",
+          "compressed camera snapshot is incorrect");
+  require(find("/setup_test/silent")["status"] == "timeout", "silent topic must time out");
+  require(find("/setup_test/text")["data"] == "first", "setup sample was overwritten");
+  for (const auto &entry : domain["nodes"])
+    require(!entry["fq_name"].get<std::string>().starts_with("/harness_setup_scan_"),
+            "scanner leaked into setup graph");
+  context->shutdown("setup snapshot test complete");
+}
 void live_test(const fs::path &root) {
   auto config = load_config(HARNESS_OBSERVATION_CONFIG);
   config["clock"] = "ros_system";
@@ -207,8 +274,10 @@ int main(int argc, char **) {
   fs::create_directories(root);
   try {
     recording_test(root);
-    if (argc > 1)
+    if (argc > 1) {
+      setup_snapshot_test();
       live_test(root);
+    }
     fs::remove_all(root);
     std::cout << "Native ROS recording/export checks passed\n";
     return 0;
