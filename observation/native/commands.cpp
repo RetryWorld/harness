@@ -1,6 +1,7 @@
 #include "common.hpp"
 #include "store.hpp"
 #include "sync.hpp"
+#include "service.hpp"
 #include <iostream>
 namespace harness::observation {
 namespace {
@@ -19,8 +20,8 @@ Json workflow(const Options &o) {
   }
   if (o.command == "outbox") {
     o.allow("--store --after");
-    return {{"connector", "placeholder"},
-            {"delivery_status", "pending"},
+    return {{"connector", "profile_snapshot_sync"},
+            {"delivery_status", "local_audit_history"},
             {"events", store.outbox(o.integer("--after", 0))}};
   }
   if (o.command == "artifact") {
@@ -201,6 +202,11 @@ int command_main(const std::string &group, int argc, char **argv) {
                           {"runtime", "--config FILE|so101 --session DIR [--store "
                                       "DIR] [--storage mcap|sqlite3] "
                                       "--domain-id N [--wall-timeout 1800]"}}
+              : group == "service"
+                    ? std::map<std::string, std::string>{
+                          {"start", "[--config FILE|so101] [--robot-id UUID] "
+                                    "[--domain-id N] [--storage mcap|sqlite3]"},
+                          {"status", ""}, {"stop", ""}}
                     : std::map<std::string, std::string>{
                     {"init", "--store DIR --config FILE|so101"},
                     {"show", "--store DIR"},
@@ -229,6 +235,7 @@ int command_main(const std::string &group, int argc, char **argv) {
           << (group == "observe" ? " <start|profile|status|windows|proposals|"
                                    "capture|candidate|promote|activate>\n"
               : group == "scan" ? " <setup|runtime>\n"
+              : group == "service" ? " <start|status|stop>\n"
                                  : " <init|show|outbox|artifact|apply|export-"
                                    "window|generation-request|sync|sync-once>\n")
           << "See edge/observation/README.md and WORKFLOW.md for options.\n";
@@ -237,7 +244,8 @@ int command_main(const std::string &group, int argc, char **argv) {
     Options o(argc, argv);
     const auto result = group == "observe" ? observe(o)
                         : group == "scan"  ? scan(o)
-                                            : workflow(o);
+                        : group == "service" ? service_command(o)
+                                               : workflow(o);
     if (!result.is_null())
       std::cout << result.dump(2) << std::endl;
     return result.is_object() && result.contains("ok") && result["ok"] == false

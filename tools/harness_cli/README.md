@@ -76,6 +76,30 @@ session is pinned to one of the domains returned by the setup scan.
 The architecture and durable profile-sync contract are in
 [`strategy/ros-scanning-and-profile-sync.md`](../../../strategy/ros-scanning-and-profile-sync.md).
 
+### `service` and `events`
+
+`rearguard connect` starts one background supervisor after pairing and setup
+discovery. It waits until the web app assigns the device to a robot, resolves
+the packaged binding from that robot's embodiment, then keeps the observer and
+workflow sync connector running. It automatically creates the local workflow
+store, starts a fresh recording session after an observer restart, and exports
+candidate windows as soon as they are ready.
+
+```bash
+rearguard service status
+rearguard service stop
+rearguard service start                 # normally unnecessary after connect
+rearguard events                        # one readable line per event
+rearguard events --follow               # live production/dev tail
+rearguard events --after 100 --json     # stable NDJSON for tooling
+```
+
+State, sessions, the durable event journal, and the supervisor log live under
+`${XDG_STATE_HOME:-$HOME/.local/state}/rearguard` (override with
+`REARGUARD_STATE_DIR`). `service start --config ... --robot-id ... --domain-id
+...` is available for isolated development rigs that are not assigned through
+the web app.
+
 ### `workflow sync` / `workflow sync-once`
 
 `workflow sync` is the native C++ edge connector for the persistent failure
@@ -450,6 +474,8 @@ sync are displayed as one numbered interactive flow. The setup page can
 therefore update before the sweep is finished. `--scan-parallelism` (1..32)
 and `--scan-settle-ms` (0..10000) tune
 the sweep; `--json` emits newline-delimited pairing and scan progress records.
+The background service is then started automatically; it is safe for it to wait
+in `waiting_for_assignment` while setup is completed in the browser.
 
 ---
 

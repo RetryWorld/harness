@@ -152,6 +152,13 @@ fs::path observation_config_path(const fs::path &requested) {
     const auto candidate = fs::path(directory) / filename;
     if (fs::is_regular_file(candidate)) return candidate;
   }
+  // Source-tree builds are commonly invoked from the repository root. Keep
+  // short names useful there too; installed Linux builds resolve below from
+  // the executable prefix.
+  for (const auto &base : {fs::path("edge/observation"), fs::path("observation")}) {
+    const auto candidate = base / filename;
+    if (fs::is_regular_file(candidate)) return candidate;
+  }
 #if defined(__linux__)
   std::array<char, 4096> executable{};
   const auto size =

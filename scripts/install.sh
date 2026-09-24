@@ -120,8 +120,9 @@ step "Checking installed CLI"
 "$BIN" abi
 okay "CLI is ready"
 
-# Persist the path silently for later terminals. The public install command
-# also exports it in the current terminal, so setup remains a two-command flow.
+# Persist the path in the user's shell startup file. A script executed through
+# `curl | sh` cannot mutate its parent shell, so installation remains one
+# command and newly started shells receive the installed CLI automatically.
 PATH_LINE="export PATH=\"$INSTALL_DIR/bin:\$PATH\""
 RC_FILE=""
 case "${SHELL:-}" in

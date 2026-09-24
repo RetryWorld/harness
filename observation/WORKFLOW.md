@@ -1,5 +1,34 @@
 # Edge profile lifecycle
 
+## Observe versus workflow
+
+`observe` is the live data plane: it subscribes to ROS 2, validates freshness,
+records MCAP, runs the installed shadow critic, and freezes bounded evidence
+windows. `workflow` is the durable control plane: it owns the versioned
+profile, candidates, approvals, artifact hashes, deployments, receipts, and
+cloud synchronization. The service runs both; normally an operator should not
+start either one by hand.
+
+```text
+profile + ROS/MCAP -> per-profile critic -> evidence window
+  -> pending candidate OR declared match to an approved recovery
+  -> approved runtime gate -> recovery controller -> enforcement record
+```
+
+The install-time `bootstrap_mlp_v1` makes inference real before training data
+exists. It is deterministic per profile, native C++, untrained, uncalibrated,
+and forced to `shadow`. It may create candidates; it cannot select a recovery
+or activate a controller. Only a deployment marked `deployment_validated` may
+route a detection to an existing immutable approved bundle, by exact evidence
+class or an explicitly approved semantic alias.
+
+Active enforcement remains fail-closed: activation still requires an approved
+bundle, a hash-verified critic artifact, and a ready recovery-controller
+adapter. Once active, the runtime durably queues the start and terminal result
+(`completed`, `fallback`, `timed_out`, or `aborted`) in SQLite. Workflow sync
+uploads those records through the device-authenticated enforcement endpoint;
+an outage leaves them queued locally.
+
 This implements the edge half of the product flow:
 
 ```text
@@ -11,11 +40,12 @@ local critic adapter → candidate window → pending profile review
     → adapter readiness check → local recovery supervision
 ```
 
-Database connectivity, trained critic inference and the recovery controller
-are explicit C++ placeholders in [native/runtime.hpp](native/runtime.hpp). They do not report readiness or
-silently acknowledge actuator operations. The demonstration generator is an
-external service: the edge exports its input package and ingests its output.
-No model API is called and no behavior-cloning training is performed here.
+The active recovery controller and trained learned-critic adapter are explicit
+C++ placeholders in [native/runtime.hpp](native/runtime.hpp). They do not
+report readiness or silently acknowledge actuator operations. The bootstrap
+shadow critic is separate and runs native inference. The edge exports an exact
+generation package; the trusted internal Modal generator calls the model. No
+behavior-cloning training is performed here.
 
 The current CLI can complete review and local installation with externally
 provided artifacts. Installed configurations report `installed_not_enforcing`.
@@ -75,8 +105,9 @@ binding. The in-memory inference context is bounded to 20 ROS seconds and
 16 MiB (whichever limit is reached first); it may be shorter than the disk
 recording. Full evidence is recorded to disk independently.
 
-The `CriticInferencePlaceholder.evaluate()` method returns no detections.
-To exercise its downstream interface while a policy and sensors are live:
+The installed `bootstrap_mlp_v1` evaluates live bounded observations, but it is
+untrained and uncalibrated. To exercise its downstream interface
+deterministically while a policy and sensors are live:
 
 ```bash
 "$CLI" observe candidate --session "$SESSION" \
@@ -160,10 +191,11 @@ Create a request payload:
 The output directory contains `evidence.mcap` and `request.json`, with the
 failure description, exact text guidance/revision, window, robot/topic
 binding, requested model and immutable `input_hash`. The database/service
-connector can eventually deliver this package; currently the command only
-writes local files. The webapp or external generation/training service must
-produce observation/action demonstrations and trained artifacts. A text plan
-or narration alone is not a behavior-cloning demonstration.
+connector applies and acknowledges the command; `generation-request` writes
+the large immutable package locally for a trusted worker. The internal Modal
+generator can turn it into a typed recovery draft. Training and validation
+must still produce observation/action demonstrations and deployable artifacts.
+A text plan or narration alone is not a behavior-cloning demonstration.
 
 ## Ingest, review and install a returned behavior
 
@@ -271,7 +303,7 @@ controller path is installed and verified. The observer's supervisory loop
 runs approximately once per wall second; hard timing guarantees and command
 gating belong in the controller's realtime loop, not in this C++ recorder.
 
-## Future database/webapp connection
+## Database/backend connection
 
 `workflow.sqlite3` is local durable state. A transaction commits the profile
 revision, request receipt and outbox event together. Retrying the same exact
@@ -283,10 +315,11 @@ changing the profile. Supply `--request-id` when retrying a CLI mutation.
 "$CLI" workflow outbox --store "$STORE" --after 0
 ```
 
-The output includes sequence numbers and up to 100 events with full profile
-snapshots; use the last sequence as the next cursor. No delivery is claimed,
-no events are deleted, and no remote acknowledgement is fabricated. The
-`DatabaseSyncPlaceholder` names the missing connector explicitly.
+The output is local audit history: sequence numbers and up to 100 events with
+full profile snapshots. Use the last sequence as the next cursor. The sync
+connector uploads the canonical latest snapshot, polls revision-bound backend
+commands, and durably reports their receipts; it does not claim that each
+historical outbox row was delivered individually.
 
 The observer publishes profile revisions as JSON `std_msgs/msg/String` on
 `/harness/observation/s_<session-id>/profile`, reliable/transient-local depth 1,
@@ -294,11 +327,11 @@ and records them in its bag. Incoming review requests can use the existing
 session `/requests` and `/responses` topics with `operation: workflow` and a
 `workflow_request` containing the same versioned request envelope used by
 `Store.apply`. Local CLI mutations use the same store; the observer picks up
-new revisions. The profile's `enforcement_status` remains `unavailable` with
-the shipped placeholders; observer `status.runtime` is the live coordinator
-status. Actor names are audit labels on this trusted local interface, not
-authentication. The future remote connector must authenticate reviewers and
-bind their decisions to these exact request/revision/hash fields.
+new revisions. Until an approved controller bundle is installed, the profile
+remains in shadow mode; observer `status.runtime` is the live coordinator
+status. Actor names are audit labels on this trusted local interface. Remote
+reviewers authenticate through Supabase, and commands remain bound to the
+exact request, revision, and content hashes.
 
 Local tests cover persistence, idempotency, conflicts, provenance, approval,
 stale capture, clock epochs and runtime transitions with fake adapters. This

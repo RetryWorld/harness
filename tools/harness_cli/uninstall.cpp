@@ -1,4 +1,5 @@
 #include "uninstall.hpp"
+#include "service.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -321,6 +322,14 @@ int run_uninstall(const UninstallOptions& options) {
             std::printf("aborted; nothing was removed\n");
             return 1;
         }
+    }
+
+    try {
+        harness::observation::stop_service_if_running();
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "error: cannot stop harness service before uninstall: %s\n",
+                     error.what());
+        return 1;
     }
 
     int failures = 0;

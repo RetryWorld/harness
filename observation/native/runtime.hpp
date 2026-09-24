@@ -7,10 +7,23 @@ struct Detection {
   std::string detector_id, evidence_class;
   double confidence = 0, before_s = 5, after_s = 2;
   std::string source = "trained_critic";
+  std::string deployment_id;
+  bool deployment_validated = false;
+  Detection() = default;
+  Detection(std::string detector, std::string evidence, double score,
+            double before = 5, double after = 2,
+            std::string detection_source = "trained_critic",
+            std::string deployment = {}, bool validated = false)
+      : detector_id(std::move(detector)), evidence_class(std::move(evidence)),
+        confidence(score), before_s(before), after_s(after),
+        source(std::move(detection_source)), deployment_id(std::move(deployment)),
+        deployment_validated(validated) {}
   Json json() const {
     return {{"detector_id", detector_id}, {"evidence_class", evidence_class},
             {"confidence", confidence},   {"before_s", before_s},
-            {"after_s", after_s},         {"source", source}};
+            {"after_s", after_s},         {"source", source},
+            {"deployment_id", deployment_id},
+            {"deployment_validated", deployment_validated}};
   }
 };
 struct ObservationMessage {
@@ -57,21 +70,19 @@ struct RecoveryControllerPlaceholder final : ControllerAdapter {
   bool resume() override { return false; }
   bool hold(const std::string &) override { return false; }
 };
-struct DatabaseSyncPlaceholder {
-  bool ready() const { return false; }
-  void push(const Json &) {
-    throw std::runtime_error(
-        "database connector not implemented; outbox remains pending");
-  }
-};
 class Runtime {
   const Store &store_;
   CriticAdapter &critic_;
   ControllerAdapter &controller_;
   Json deployment_id_ = nullptr, contract_;
+  Json failure_id_ = nullptr;
+  std::string deployment_content_hash_, enforcement_event_id_;
+  Ns enforcement_started_wall_ns_ = 0;
   double deadline_ = 0;
   int retries_ = 0;
   bool last_match_ = false;
+  void record_enforcement(const std::string &outcome, const Json &detail,
+                          bool terminal);
 
 public:
   std::string status = "disabled";

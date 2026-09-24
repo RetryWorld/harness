@@ -15,6 +15,9 @@ public:
   Json apply_remote(const Json &request) const;
   Json pending_sync_receipts() const;
   void acknowledge_sync_receipts(const Json &receipts) const;
+  void record_enforcement(const Json &record) const;
+  Json pending_enforcements() const;
+  void acknowledge_enforcements(const Json &records) const;
 
 private:
   Json apply_internal(const Json &request, bool queue_sync_receipt) const;

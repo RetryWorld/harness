@@ -27,6 +27,10 @@ Json Runtime::activate() {
           "controller adapter refused deployment");
   contract_ = content["contract"];
   deployment_id_ = d["id"];
+  failure_id_ = d["failure_id"];
+  deployment_content_hash_ = d.value("content_hash", "");
+  enforcement_event_id_.clear();
+  enforcement_started_wall_ns_ = 0;
   last_match_ = false;
   status = "nominal";
   return snapshot();
@@ -36,8 +40,33 @@ Json Runtime::snapshot() const {
           {"deployment_id", deployment_id_},
           {"critic_ready", critic_.ready()},
           {"controller_ready", controller_.ready()},
+          {"enforcement_event_id", enforcement_event_id_.empty()
+                                       ? Json(nullptr) : Json(enforcement_event_id_)},
           {"recovery_attempt",
            status == "recovering" ? Json(retries_ + 1) : Json(nullptr)}};
+}
+void Runtime::record_enforcement(const std::string &outcome,
+                                 const Json &detail, bool terminal) {
+  if (enforcement_event_id_.empty()) {
+    enforcement_event_id_ = "enforcement-" + unique_id();
+    enforcement_started_wall_ns_ = wall_ns();
+  }
+  Json record = {{"schema_version", 1},
+                 {"event_id", enforcement_event_id_},
+                 {"profile_id", store_.snapshot()["profile_id"]},
+                 {"deployment_id", deployment_id_},
+                 {"failure_id", failure_id_},
+                 {"mode", "active"},
+                 {"outcome", outcome},
+                 {"started_wall_ns", enforcement_started_wall_ns_},
+                 {"ended_wall_ns", terminal ? Json(wall_ns()) : Json(nullptr)},
+                 {"integrity", {{"deployment_content_hash", deployment_content_hash_}}},
+                 {"record", detail}};
+  store_.record_enforcement(record);
+  if (terminal) {
+    enforcement_event_id_.clear();
+    enforcement_started_wall_ns_ = 0;
+  }
 }
 Json Runtime::fallback(const std::string &reason) {
   bool held = false;
@@ -49,6 +78,11 @@ Json Runtime::fallback(const std::string &reason) {
   auto result = snapshot();
   result.update(
       {{"kind", "fallback"}, {"reason", reason}, {"hold_acknowledged", held}});
+  if (!enforcement_event_id_.empty())
+    record_enforcement(reason.find("timeout") != std::string::npos
+                           ? "timed_out"
+                           : reason == "runtime deactivated" ? "aborted" : "fallback",
+                       result, true);
   return result;
 }
 Json Runtime::deactivate() {
@@ -59,6 +93,8 @@ Json Runtime::deactivate() {
   }
   status = "disabled";
   deployment_id_ = nullptr;
+  failure_id_ = nullptr;
+  deployment_content_hash_.clear();
   return snapshot();
 }
 Json Runtime::step(const Observations &observations, double now, bool fresh) {
@@ -83,7 +119,9 @@ Json Runtime::step(const Observations &observations, double now, bool fresh) {
         if (!controller_.resume())
           return fallback("nominal reentry not acknowledged");
         status = "nominal";
-        return event("recovery_completed");
+        auto result = event("recovery_completed");
+        record_enforcement("completed", result, true);
+        return result;
       }
       if (outcome == "failed") {
         if (retries_ < contract_["retry_budget"].get<int>()) {
@@ -116,7 +154,9 @@ Json Runtime::step(const Observations &observations, double now, bool fresh) {
       status = "recovering";
       retries_ = 0;
       deadline_ = now + contract_["timeout_ms"].get<double>() / 1000;
-      return event("recovery_started");
+      auto result = event("recovery_started");
+      record_enforcement("unknown", result, false);
+      return result;
     }
   } catch (const std::exception &error) {
     return fallback(std::string("adapter error: ") + error.what());

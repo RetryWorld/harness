@@ -22,6 +22,8 @@ public:
     }
     sqlite3_busy_timeout(db, 10000);
     exec("PRAGMA synchronous=FULL");
+    exec("CREATE TABLE IF NOT EXISTS enforcement_outbox("
+         "id TEXT PRIMARY KEY, body TEXT NOT NULL)");
   }
   ~Database() { sqlite3_close(db); }
   void exec(const char *sql) {
@@ -114,6 +116,7 @@ Store Store::create(const fs::path &directory, const fs::path &config) {
                 {"jobs", Json::object()},
                 {"bundles", Json::object()},
                 {"deployments", Json::object()},
+                {"critic_deployment", nullptr},
                 {"installed_deployment", nullptr},
                 {"enforcement_status", "unavailable"},
                 {"placeholders",
@@ -124,7 +127,8 @@ Store Store::create(const fs::path &directory, const fs::path &config) {
       "CHECK(id=1), body TEXT NOT NULL); CREATE TABLE receipts(id TEXT PRIMARY "
       "KEY, request_hash TEXT NOT NULL, response TEXT NOT NULL); CREATE TABLE "
       "outbox(seq INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL); "
-      "CREATE TABLE sync_receipts(id TEXT PRIMARY KEY, body TEXT NOT NULL);");
+      "CREATE TABLE sync_receipts(id TEXT PRIMARY KEY, body TEXT NOT NULL); "
+      "CREATE TABLE IF NOT EXISTS enforcement_outbox(id TEXT PRIMARY KEY, body TEXT NOT NULL);");
   db.exec("BEGIN IMMEDIATE");
   Statement q(db, "INSERT INTO profile VALUES(1, ?)");
   q.bind(1, encoded(state));
@@ -263,6 +267,56 @@ void Store::acknowledge_sync_receipts(const Json &receipts) const {
     throw;
   }
 }
+void Store::record_enforcement(const Json &record) const {
+  require(record.is_object() && record.value("schema_version", 0) == 1,
+          "enforcement record requires schema_version 1");
+  const auto id = required_text(record.at("event_id"), "event_id");
+  require(record.at("profile_id") == snapshot().at("profile_id"),
+          "enforcement record profile mismatch");
+  const auto mode = required_text(record.at("mode"), "mode");
+  const auto outcome = required_text(record.at("outcome"), "outcome");
+  require(mode == "shadow" || mode == "active", "invalid enforcement mode");
+  require(outcome == "completed" || outcome == "fallback" ||
+              outcome == "timed_out" || outcome == "aborted" ||
+              outcome == "unknown",
+          "invalid enforcement outcome");
+  require(record.at("started_wall_ns").is_number_integer() &&
+              record.at("started_wall_ns").get<Ns>() > 0,
+          "invalid enforcement start time");
+  Database db(root / "workflow.sqlite3");
+  Statement save(db, "INSERT INTO enforcement_outbox VALUES(?,?) ON CONFLICT(id) "
+                     "DO UPDATE SET body=excluded.body");
+  save.bind(1, id);
+  save.bind(2, encoded(record));
+  save.next();
+}
+Json Store::pending_enforcements() const {
+  Database db(root / "workflow.sqlite3");
+  Statement query(db, "SELECT body FROM enforcement_outbox ORDER BY rowid LIMIT 100");
+  auto records = Json::array();
+  while (query.next()) records.push_back(Json::parse(query.text(0)));
+  return records;
+}
+void Store::acknowledge_enforcements(const Json &records) const {
+  require(records.is_array(), "enforcement acknowledgement must be an array");
+  Database db(root / "workflow.sqlite3");
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    for (const auto &record : records) {
+      // Delete exactly the uploaded version. A recovery may finish while its
+      // start record is in flight; in that race the terminal replacement must
+      // remain queued for the next cycle.
+      Statement remove(db, "DELETE FROM enforcement_outbox WHERE id=? AND body=?");
+      remove.bind(1, required_text(record.at("event_id"), "event_id"));
+      remove.bind(2, encoded(record));
+      remove.next();
+    }
+    db.exec("COMMIT");
+  } catch (...) {
+    db.exec("ROLLBACK");
+    throw;
+  }
+}
 Json Store::apply_internal(const Json &request, bool queue_sync_receipt) const {
   require(request.is_object() && request.value("schema_version", 0) == 1,
           "request requires schema_version 1");
@@ -350,6 +404,46 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
             std::string("unknown ") + key);
     return s.at(collection).at(p.at(key).get<std::string>());
   };
+  if (op == "install_critic") {
+    const auto &deployment = p.at("deployment");
+    require(deployment.is_object() && deployment.value("schema_version", 0) == 1,
+            "critic deployment requires schema_version 1");
+    for (const auto *key : {"id", "profile_id", "binding_hash", "runtime", "mode"})
+      required_text(deployment.at(key), key);
+    require(deployment.at("profile_id") == s.at("profile_id"),
+            "critic deployment belongs to a different profile");
+    require(deployment.at("binding_hash") == s.at("binding_hash"),
+            "critic deployment binding mismatch");
+    require(deployment.at("mode") == "shadow",
+            "cloud critic deployments must begin in shadow mode");
+    require(deployment.value("trained", true) == false ||
+                deployment.value("deployment_validated", false),
+            "trained critic deployment is missing validation");
+    require(deployment.contains("classes") && deployment["classes"].is_array() &&
+                !deployment["classes"].empty() && deployment["classes"].size() <= 64,
+            "critic deployment requires 1..64 classes");
+    for (const auto &name : deployment["classes"])
+      required_text(name, "critic class");
+    if (deployment.at("runtime") == "bootstrap_mlp_v1") {
+      const auto seed = required_text(deployment.at("seed"), "critic seed");
+      require(seed.size() == 16 &&
+                  seed.find_first_not_of("0123456789abcdef") == std::string::npos,
+              "bootstrap critic seed must be 16 lowercase hexadecimal characters");
+      range(deployment.at("candidate_threshold"), 0, 1, "candidate_threshold");
+      require(deployment.value("minimum_samples", 0) >= 1 &&
+                  deployment.value("minimum_samples", 0) <= 10000,
+              "bootstrap critic minimum_samples must be within 1..10000");
+    }
+    if (!s.contains("critic_deployment") || s["critic_deployment"] != deployment)
+      s["critic_deployment"] = deployment;
+    if (s.contains("placeholders") && s["placeholders"].is_array()) {
+      auto &placeholders = s["placeholders"];
+      placeholders.erase(std::remove(placeholders.begin(), placeholders.end(),
+                                     "critic_inference"), placeholders.end());
+    }
+    if (s["installed_deployment"].is_null()) s["enforcement_status"] = "shadow";
+    return s["critic_deployment"];
+  }
   if (op == "candidate") {
     const auto &w = p.at("window");
     require(w.value("status", "") == "ready" && w.contains("coverage") &&
@@ -374,12 +468,10 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
         digest(Json::array({session, w.at("epoch"), w.at("id")})).substr(0, 24);
     if (s["candidates"].contains(id))
       return s["candidates"][id];
-    return s["candidates"][id] = {{"id", id},
-                                  {"session_id", session},
-                                  {"window", w},
-                                  {"detection", d},
-                                  {"status", "pending_review"},
-                                  {"evidence", nullptr}};
+    return s["candidates"][id] = {
+        {"id", id}, {"session_id", session}, {"window", w},
+        {"detection", d}, {"status", "pending_review"},
+        {"approved_recovery_match", nullptr}, {"evidence", nullptr}};
   }
   if (op == "attach_evidence") {
     auto &c = item("candidates", "candidate_id");
@@ -387,6 +479,37 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
             "candidate evidence is immutable once attached");
     verify_artifact(p.at("artifact"), "evidence_mcap");
     c["evidence"] = p["artifact"];
+    // Routing happens only after immutable MCAP evidence is attached. An
+    // unvalidated/bootstrap critic cannot reach this branch, even when a
+    // random label happens to equal an approved evidence class.
+    const auto &detection = c.at("detection");
+    const auto deployed_critic = s.value("critic_deployment", Json(nullptr));
+    const bool validated_deployment =
+        detection.value("deployment_validated", false) && deployed_critic.is_object() &&
+        deployed_critic.value("deployment_validated", false) &&
+        detection.value("deployment_id", "") == deployed_critic.value("id", "");
+    if (validated_deployment) {
+      const auto evidence_class = detection.at("evidence_class").get<std::string>();
+      for (auto it = s["bundles"].begin(); it != s["bundles"].end(); ++it) {
+        const auto &bundle = it.value();
+        if (bundle.value("status", "") != "approved") continue;
+        const auto &contract = bundle.at("content").at("contract");
+        bool semantic_match = contract.value("evidence_class", "") == evidence_class;
+        if (!semantic_match && contract.contains("semantic_labels") &&
+            contract["semantic_labels"].is_array())
+          semantic_match = std::find(contract["semantic_labels"].begin(),
+                                     contract["semantic_labels"].end(),
+                                     Json(evidence_class)) !=
+                           contract["semantic_labels"].end();
+        if (!semantic_match) continue;
+        c["status"] = "approved_recovery_match";
+        c["approved_recovery_match"] = {
+            {"bundle_id", it.key()}, {"recovery", bundle["content"]["recovery"]},
+            {"match", contract.value("evidence_class", "") == evidence_class
+                          ? "exact" : "approved_semantic_alias"}};
+        break;
+      }
+    }
     return c;
   }
   if (op == "reject_candidate" || op == "accept_failure") {
@@ -540,12 +663,15 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
                 {"contract", b["content"]["contract"]}}}};
     s["deployments"][id] = d;
     s["installed_deployment"] = id;
+    s["enforcement_status"] = "installed_not_enforcing";
     return d;
   }
   if (op == "deactivate") {
     Json r = {{"previous", s["installed_deployment"]},
               {"reason", required_text(p.at("reason"), "reason")}};
     s["installed_deployment"] = nullptr;
+    s["enforcement_status"] =
+        s.value("critic_deployment", Json(nullptr)).is_object() ? "shadow" : "unavailable";
     return r;
   }
   throw std::runtime_error("unknown workflow operation: " + op);

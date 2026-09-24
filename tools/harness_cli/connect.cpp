@@ -23,6 +23,8 @@
 
 #include "common.hpp"
 #include "service_config.hpp"
+#include "events.hpp"
+#include "service.hpp"
 
 namespace harness::cli {
 namespace {
@@ -280,6 +282,10 @@ int run_automatic_setup_scan(const ConnectOptions& options, const std::string& a
         }
         inventory["captured_wall_ns"] = harness::observation::wall_ns();
         inventory["inventory_hash"] = harness::observation::digest(inventory);
+        const auto service_directory = harness::observation::state_root() / "service";
+        fs::create_directories(service_directory);
+        harness::observation::atomic_json(service_directory / "setup-inventory.json",
+                                          inventory);
         ++sequence;
         synced = report_scan_event(api_url, anon_key, device_id, secret, scan_id,
                                    sequence, "completed", 100, inventory, -1, -1, {},
@@ -538,7 +544,25 @@ int run_connect(const ConnectOptions& options) {
                         paint(color, "\033[1m"), paint(color, "\033[0m"),
                         credential_path.c_str());
         }
-        return run_automatic_setup_scan(options, api_url, anon_key, device_id, secret);
+        harness::observation::record_event(
+            "connect", "pairing", "success",
+            {{"device_id", device_id}, {"device_name", device_name}});
+        const int scan_result =
+            run_automatic_setup_scan(options, api_url, anon_key, device_id, secret);
+        try {
+            const auto service = harness::observation::start_service_after_connect();
+            harness::observation::record_event("service", "auto_start", "success", service);
+            if (!options.json)
+                std::printf("  Harness service %s (inspect with `rearguard service status`).\n",
+                            service.value("status", "started").c_str());
+        } catch (const std::exception& error) {
+            harness::observation::record_event(
+                "service", "auto_start", "failure", {{"message", error.what()}});
+            std::fprintf(stderr, "error: paired, but could not start harness service: %s\n",
+                         error.what());
+            return 1;
+        }
+        return scan_result;
     }
     ::signal(SIGINT, previous_handler);
     if (interrupted) {

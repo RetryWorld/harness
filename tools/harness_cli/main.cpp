@@ -25,6 +25,8 @@
 #include "replay/replay.hpp"
 #include "replay/trace.hpp"
 #include "uninstall.hpp"
+#include "events.hpp"
+#include "service.hpp"
 
 namespace {
 
@@ -750,6 +752,8 @@ void print_usage() {
                   "  rearguard abi\n"
                   "  rearguard connect [--name <device-name>] [--scan-settle-ms 750] "
                   "[--scan-parallelism 16] [--json]\n"
+                  "  rearguard service <start|status|stop> [options]\n"
+                  "  rearguard events [--after N] [--follow] [--json]\n"
                   "  rearguard scan <setup|runtime> [options]\n"
                   "  rearguard observe <start|profile|status|capture|windows|promote|proposals> [options]\n"
                   "  rearguard workflow <init|show|outbox|artifact|apply|export-window|generation-request|sync|sync-once> [options]\n"
@@ -767,7 +771,7 @@ bool expect_exact_args(int argc, int wanted, const char* command) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int run_main(int argc, char** argv) {
     if (argc < 2) {
         print_usage();
         return 1;
@@ -783,8 +787,12 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    if (cmd == "scan" || cmd == "observe" || cmd == "workflow") {
+    if (cmd == "scan" || cmd == "observe" || cmd == "workflow" || cmd == "service") {
         return harness::observation::command_main(cmd, argc - 2, argv + 2);
+    }
+
+    if (cmd == "events") {
+        return harness::observation::events_main(argc - 2, argv + 2);
     }
 
     if (cmd == "abi") {
@@ -985,4 +993,17 @@ int main(int argc, char** argv) {
     }
     print_usage();
     return 1;
+}
+
+int main(int argc, char** argv) {
+    harness::observation::set_service_executable(argv[0]);
+    const int result = run_main(argc, argv);
+    try {
+        harness::observation::record_event(
+            "cli", argc > 1 ? argv[1] : "usage", result == 0 ? "success" : "failure",
+            {{"exit_code", result}});
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "warning: could not record CLI event: %s\n", error.what());
+    }
+    return result;
 }

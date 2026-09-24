@@ -9,10 +9,12 @@ emits timestamped experimental scores. A bounded worker utility replaces queued
 work with the latest request and invalidates results across resets or expiry.
 Inference is not part of the realtime kernel ABI.
 
-The current executable supports completed MCAP replay and canonical-tensor
-diagnostics. **It is not yet connected to the live observer's candidate adapter
-or approved recovery supervision.** Existing activation remains blocked. Model
-scores are uncalibrated and cannot establish controller readiness.
+The live observer now has an install-time native bootstrap MLP for the
+untrained phase. It is a separate, shadow-only detector and is intentionally
+not controller-ready. The TinyCLIP/TensorRT executable supports completed MCAP
+replay and canonical-tensor diagnostics; connecting that learned bundle to the
+same live adapter remains the next runtime replacement. Uncalibrated model
+scores cannot establish controller readiness.
 
 ## Build on Jetson
 

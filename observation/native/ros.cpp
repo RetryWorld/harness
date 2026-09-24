@@ -2,9 +2,11 @@
 #include "evidence.hpp"
 #include "recording.hpp"
 #include "runtime.hpp"
+#include "events.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <deque>
 #include <fcntl.h>
 #include <fstream>
@@ -78,6 +80,107 @@ bool finite(const std::vector<double> &values) {
   return std::all_of(values.begin(), values.end(),
                      [](double v) { return std::isfinite(v); });
 }
+template <class T> T decode_bytes(const std::vector<std::uint8_t> &bytes) {
+  rclcpp::SerializedMessage serialized(bytes.size());
+  auto &raw = serialized.get_rcl_serialized_message();
+  require(raw.buffer_capacity >= bytes.size(), "serialized message allocation failed");
+  std::memcpy(raw.buffer, bytes.data(), bytes.size());
+  raw.buffer_length = bytes.size();
+  return decode<T>(serialized);
+}
+
+// The install-time bootstrap critic is a deliberately tiny, fixed-shape MLP
+// over the latest joint/action summary. Its network scoring allocates nothing. Its weights are
+// deterministic per profile but untrained, so it is shadow-only and can only
+// create review candidates.  It gives every installation a real inference
+// path while the TensorRT vision critic is trained and validated.
+class BootstrapCritic final : public CriticAdapter {
+  static constexpr std::size_t features = 12, hidden = 16;
+  Json deployment_;
+  std::array<double, features * hidden> first_{};
+  std::array<double, hidden> first_bias_{}, second_{}, feature_{};
+  double second_bias_ = 0.0;
+  std::size_t samples_ = 0;
+  Ns epoch_ = -1;
+
+  static double squash(double value) {
+    return std::copysign(std::log1p(std::abs(value)), value) / 8.0;
+  }
+
+public:
+  explicit BootstrapCritic(Json deployment) : deployment_(std::move(deployment)) {
+    require(deployment_.value("runtime", "") == "bootstrap_mlp_v1" &&
+                deployment_.value("mode", "") == "shadow" &&
+                deployment_.value("trained", true) == false,
+            "invalid bootstrap critic contract");
+    std::uint64_t state = std::stoull(deployment_.at("seed").get<std::string>(), nullptr, 16);
+    auto weight = [&]() {
+      state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+      return (static_cast<double>(state & 0xffffU) / 32767.5 - 1.0) * 0.35;
+    };
+    for (auto &value : first_) value = weight();
+    for (auto &value : first_bias_) value = weight() * 0.1;
+    for (auto &value : second_) value = weight();
+  }
+  bool ready() const override { return true; }
+  bool load(const fs::path &, const Json &, const Json &) override { return false; }
+  std::optional<Detection> evaluate(const Observations &observations) override {
+    if (epoch_ != observations.epoch) { epoch_ = observations.epoch; samples_ = 0; }
+    const ObservationMessage *joint_packet = nullptr, *command_packet = nullptr;
+    for (auto it = observations.messages.rbegin(); it != observations.messages.rend(); ++it) {
+      if (!joint_packet && it->type == "sensor_msgs/msg/JointState") joint_packet = &*it;
+      if (!command_packet && it->type == "std_msgs/msg/Float64MultiArray") command_packet = &*it;
+      if (joint_packet && command_packet) break;
+    }
+    if (!joint_packet) return std::nullopt;
+    const auto joint = decode_bytes<sensor_msgs::msg::JointState>(joint_packet->cdr);
+    if (joint.position.empty() || !finite(joint.position)) return std::nullopt;
+    feature_.fill(0);
+    auto summarize = [&](const std::vector<double> &values, std::size_t offset) {
+      if (values.empty() || !finite(values)) return;
+      double sum = 0, maximum = 0, squared = 0;
+      for (const auto value : values) {
+        sum += std::abs(value); maximum = std::max(maximum, std::abs(value));
+        squared += value * value;
+      }
+      feature_[offset] = squash(sum / static_cast<double>(values.size()));
+      feature_[offset + 1] = squash(maximum);
+      feature_[offset + 2] = squash(std::sqrt(squared / static_cast<double>(values.size())));
+    };
+    summarize(joint.position, 0); summarize(joint.velocity, 3); summarize(joint.effort, 6);
+    if (command_packet) {
+      const auto command = decode_bytes<std_msgs::msg::Float64MultiArray>(command_packet->cdr);
+      if (finite(command.data) && command.data.size() == joint.position.size()) {
+        double sum = 0, maximum = 0, squared = 0;
+        for (std::size_t index = 0; index < command.data.size(); ++index) {
+          const double error = command.data[index] - joint.position[index];
+          sum += std::abs(error); maximum = std::max(maximum, std::abs(error));
+          squared += error * error;
+        }
+        feature_[9] = squash(sum / static_cast<double>(command.data.size()));
+        feature_[10] = squash(maximum);
+        feature_[11] = squash(std::sqrt(squared / static_cast<double>(command.data.size())));
+      }
+    }
+    ++samples_;
+    if (samples_ < deployment_.value("minimum_samples", std::size_t{8}))
+      return std::nullopt;
+    std::array<double, hidden> layer{};
+    for (std::size_t h = 0; h < hidden; ++h) {
+      layer[h] = first_bias_[h];
+      for (std::size_t f = 0; f < features; ++f)
+        layer[h] += first_[h * features + f] * feature_[f];
+      layer[h] = std::tanh(layer[h]);
+    }
+    double logit = second_bias_;
+    for (std::size_t h = 0; h < hidden; ++h) logit += second_[h] * layer[h];
+    const double score = 1.0 / (1.0 + std::exp(-logit));
+    if (score < deployment_.value("candidate_threshold", 0.9)) return std::nullopt;
+    const auto deployment_id = deployment_.at("id").get<std::string>();
+    return Detection{deployment_id, deployment_.at("classes")[0].get<std::string>(), score,
+                     5, 2, "bootstrap_untrained_critic", deployment_id, false};
+  }
+};
 std::pair<bool, Json> validate(const Json &topic, const Json &config,
                                const rclcpp::SerializedMessage &data) {
   const auto type = topic["type"].get<std::string>();
@@ -123,7 +226,9 @@ class Observer {
   std::string id_ = unique_id(), prefix_ = "/harness/observation/s_" + id_;
   Evidence evidence_;
   std::unique_ptr<Store> store_;
-  CriticInferencePlaceholder inference_, runtime_critic_;
+  CriticInferencePlaceholder no_inference_, runtime_critic_;
+  CriticAdapter *inference_ = &no_inference_;
+  std::unique_ptr<BootstrapCritic> bootstrap_critic_;
   RecoveryControllerPlaceholder controller_;
   std::unique_ptr<Runtime> runtime_;
   rclcpp::Node::SharedPtr node_;
@@ -159,6 +264,10 @@ class Observer {
                    serialize(message), node_->now().nanoseconds(),
                    evidence_.state["epoch"].get<Ns>());
     events_->publish(message);
+    const bool failed = kind.find("failed") != std::string::npos ||
+                        kind.find("skipped") != std::string::npos ||
+                        (value.contains("ok") && value["ok"] == false);
+    record_event("observer", kind, failed ? "failure" : "success", value);
     std::cout << value.dump(2) << std::endl;
   }
   void tick() {
@@ -312,7 +421,7 @@ class Observer {
     observations.receipt_ros_ns = *evidence_.now;
     observations.messages.assign(history_.begin(), history_.end());
     if (fresh && store_)
-      if (const auto detection = inference_.evaluate(observations)) {
+      if (const auto detection = inference_->evaluate(observations)) {
         try {
           event("candidate_marked", {{"window", candidate(detection->json())}});
         } catch (const std::exception &e) {
@@ -403,6 +512,11 @@ public:
       store_ = std::make_unique<Store>(options_.path("--store"));
       require(store_->snapshot()["binding_hash"] == digest(config_),
               "observer config differs from workflow binding");
+      const auto deployment = store_->snapshot().value("critic_deployment", Json(nullptr));
+      if (deployment.is_object() && deployment.value("runtime", "") == "bootstrap_mlp_v1") {
+        bootstrap_critic_ = std::make_unique<BootstrapCritic>(deployment);
+        inference_ = bootstrap_critic_.get();
+      }
       runtime_ =
           std::make_unique<Runtime>(*store_, runtime_critic_, controller_);
     }
@@ -466,8 +580,11 @@ public:
     std::string termination = "wall_timeout";
     evidence_.state["status"] = "observing";
     try {
+      Json critics = Json::array();
+      if (bootstrap_critic_)
+        critics.push_back(store_->snapshot()["critic_deployment"]);
       event("observer_started", {{"session", session_.string()},
-                                 {"critics", Json::array()},
+                                 {"critics", critics},
                                  {"recoveries", Json::array()}});
       rclcpp::ExecutorOptions executor_options;
       executor_options.context = context_;

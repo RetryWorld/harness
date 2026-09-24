@@ -1,4 +1,5 @@
 #include "evidence.hpp"
+#include "events.hpp"
 #include "runtime.hpp"
 #include "sync.hpp"
 #include <cstdlib>
@@ -140,7 +141,9 @@ struct FakeController final : ControllerAdapter {
 };
 struct FakeWorkflowTransport final : WorkflowTransport {
   Json commands = Json::array();
+  Json deployment = nullptr;
   std::vector<Json> uploads;
+  std::vector<Json> enforcement_uploads;
   bool fail_upload = false;
   void upload(const std::string &robot_id, const Json &snapshot,
               const Json &receipts) override {
@@ -153,6 +156,11 @@ struct FakeWorkflowTransport final : WorkflowTransport {
     const auto result = commands;
     commands = Json::array();
     return result;
+  }
+  Json critic_deployment(const std::string &) override { return deployment; }
+  void upload_enforcements(const std::string &robot_id, const Json &records) override {
+    if (fail_upload) throw std::runtime_error("offline");
+    enforcement_uploads.push_back({{"robot_id", robot_id}, {"records", records}});
   }
 };
 void evidence_tests() {
@@ -199,6 +207,41 @@ void evidence_tests() {
   rejects([&] { bad.promote(bad_id, "failure", "operator"); }, "insufficient");
 }
 void workflow_tests() {
+  {
+    Fixture critic_sync;
+    FakeWorkflowTransport transport;
+    const auto initial = critic_sync.store.snapshot();
+    transport.deployment = {
+        {"schema_version", 1}, {"id", "critic-test"},
+        {"profile_id", initial["profile_id"]},
+        {"profile_revision", initial["revision"]},
+        {"binding_hash", initial["binding_hash"]},
+        {"runtime", "bootstrap_mlp_v1"}, {"mode", "shadow"},
+        {"trained", false}, {"deployment_validated", false},
+        {"classes", {"behavior_anomaly"}}, {"seed", "0123456789abcdef"},
+        {"candidate_threshold", 0.9}, {"minimum_samples", 8}};
+    WorkflowConnector connector(critic_sync.store,
+                                "00000000-0000-4000-8000-000000000102",
+                                transport);
+    const auto installed = connector.cycle();
+    check(installed["critic_deployment"]["id"] == "critic-test" &&
+              critic_sync.store.snapshot()["enforcement_status"] == "shadow",
+          "sync installs the per-profile shadow critic");
+    const auto revision = critic_sync.store.snapshot()["revision"];
+    connector.cycle();
+    check(critic_sync.store.snapshot()["revision"] == revision,
+          "unchanged critic deployment is idempotent");
+    critic_sync.store.record_enforcement(
+        {{"schema_version", 1}, {"event_id", "enforcement-sync-test"},
+         {"profile_id", initial["profile_id"]}, {"deployment_id", nullptr},
+         {"failure_id", nullptr}, {"mode", "active"}, {"outcome", "fallback"},
+         {"started_wall_ns", wall_ns()}, {"ended_wall_ns", wall_ns()},
+         {"integrity", Json::object()}, {"record", Json::object()}});
+    connector.cycle();
+    check(transport.enforcement_uploads.size() == 1 &&
+              critic_sync.store.pending_enforcements().empty(),
+          "sync uploads and acknowledges durable enforcement records");
+  }
   {
     const auto config_path = fs::path(HARNESS_OBSERVATION_CONFIG);
     require(::setenv("REARGUARD_OBSERVATION_CONFIG_DIR",
@@ -324,6 +367,36 @@ void workflow_tests() {
                 {{"bundle_id", b["id"]}, {"content_hash", "wrong"}});
       },
       "exact");
+  f.apply("approve_bundle",
+          {{"bundle_id", b["id"]}, {"content_hash", b["content_hash"]}});
+  const auto profile_before_critic = f.store.snapshot();
+  f.apply("install_critic",
+          {{"deployment",
+            {{"schema_version", 1}, {"id", "validated-deployment"},
+             {"profile_id", profile_before_critic["profile_id"]},
+             {"profile_revision", profile_before_critic["revision"]},
+             {"binding_hash", profile_before_critic["binding_hash"]},
+             {"runtime", "test_trained_critic"}, {"mode", "shadow"},
+             {"trained", true}, {"deployment_validated", true},
+             {"classes", {"target_moved"}}}}});
+  Json coverage = Json::object();
+  for (const auto &topic : f.binding["topics"])
+    coverage[topic["name"].get<std::string>()] = {{"valid_count", 5}};
+  auto routed = f.apply(
+      "candidate",
+      {{"window", {{"id", unique_id()}, {"epoch", 3}, {"status", "ready"},
+                    {"coverage", coverage}}},
+       {"session_id", "trained-session"}, {"binding_hash", digest(f.binding)},
+       {"detection", {{"detector_id", "validated-critic"},
+                      {"deployment_id", "validated-deployment"},
+                      {"deployment_validated", true}, {"source", "trained_critic"},
+                      {"confidence", 0.95}, {"evidence_class", "target_moved"}}}});
+  routed = f.apply("attach_evidence",
+                   {{"candidate_id", routed["id"]},
+                    {"artifact", f.artifact("evidence_mcap")}});
+  check(routed["status"] == "approved_recovery_match" &&
+            routed["approved_recovery_match"]["bundle_id"] == b["id"],
+        "validated critic routes only to an already approved recovery");
   const auto new_job =
       f.apply("request_demonstration", {{"failure_id", b["failure_id"]},
                                         {"requested_model", "external"}});
@@ -372,6 +445,22 @@ void workflow_tests() {
   }
   rejects([&] { f.apply("deploy", {{"bundle_id", b["id"]}}); }, "hash/size");
 }
+void event_tests() {
+  const auto root =
+      fs::temp_directory_path() / ("harness-event-test-" + unique_id());
+  require(::setenv("REARGUARD_STATE_DIR", root.c_str(), 1) == 0,
+          "could not set event state path");
+  record_event("setup_scan", "complete", "success", {{"domains", 1}});
+  record_event("workflow_sync", "cycle", "failure", {{"message", "offline"}});
+  const auto events = read_events();
+  check(events.size() == 2 && events[0]["status"] == "success" &&
+            events[1]["status"] == "failure" && events[1]["index"] == 2,
+        "durable event journal preserves order and status");
+  check(read_events(1).size() == 1,
+        "event journal supports incremental inspection");
+  ::unsetenv("REARGUARD_STATE_DIR");
+  fs::remove_all(root);
+}
 void runtime_tests() {
   Fixture f;
   f.deploy();
@@ -380,9 +469,23 @@ void runtime_tests() {
   Runtime r(f.store, critic, controller);
   r.activate();
   check(r.step({}, 0)["kind"] == "recovery_started", "recovery begins");
+  const auto started = f.store.pending_enforcements();
+  check(started.size() == 1 && started[0]["outcome"] == "unknown",
+        "enforcement start is durably queued");
   controller.outcome = "succeeded";
   check(r.step({}, 0.1)["kind"] == "recovery_completed",
         "completion acknowledged");
+  const auto completed = f.store.pending_enforcements();
+  check(completed.size() == 1 && completed[0]["outcome"] == "completed" &&
+            completed[0]["ended_wall_ns"].is_number_integer(),
+        "terminal enforcement outcome replaces the pending start record");
+  f.store.acknowledge_enforcements(started);
+  check(f.store.pending_enforcements().size() == 1 &&
+            f.store.pending_enforcements()[0]["outcome"] == "completed",
+        "acknowledging an in-flight start cannot erase its terminal update");
+  f.store.acknowledge_enforcements(completed);
+  check(f.store.pending_enforcements().empty(),
+        "acknowledged enforcement leaves the durable outbox");
   check(r.step({}, 0.2).is_null(), "latched evidence does not retrigger");
   critic.detection.reset();
   r.step({}, 0.3);
@@ -415,6 +518,7 @@ void runtime_tests() {
 } // namespace
 int main() {
   try {
+    event_tests();
     check(encoded(Json::parse(
               "{\"z\":1e-5,\"a\":1e15,\"x\":1e16,\"unicode\":\"α\"}")) ==
               "{\"a\":1000000000000000.0,\"unicode\":\"\\u03b1\",\"x\":1e+16,"

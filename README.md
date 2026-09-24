@@ -106,8 +106,10 @@ For ROS graph/device discovery and source-rate value capture, use
 profile-sync boundary are documented in
 [`strategy/ros-scanning-and-profile-sync.md`](../strategy/ros-scanning-and-profile-sync.md).
 `rearguard connect` invokes the setup sweep automatically after browser
-approval and streams each bounded domain batch to the setup profile feed; the
-standalone command remains available for offline inventory capture.
+approval, then starts the persistent harness service. The service waits for the
+browser's robot assignment, starts runtime observation and workflow sync,
+restarts either process after failure, and exports ready evidence windows. The
+standalone commands remain available for diagnostics.
 
 `rearguard` is the operator surface: validate profiles, replay traces, and
 inspect or compare the recorded episodes.
@@ -121,6 +123,8 @@ rearguard verify   <episode.mcap> [--expect-hash <hex>] [--json]
 rearguard hash     <profile.yaml> | --joints <j0,j1,j2> [--json]
 rearguard diff     <a.mcap> <b.mcap> [--json]
 rearguard scan     <setup|runtime> [options]
+rearguard service  <start|status|stop> [options]
+rearguard events   [--after N] [--follow] [--json]
 rearguard abi
 rearguard uninstall [--prefix <dir>] [--dry-run] [--yes] [--json]
 ```

@@ -1,4 +1,5 @@
 #include "sync.hpp"
+#include "events.hpp"
 
 #include <curl/curl.h>
 #include <signal.h>
@@ -82,6 +83,44 @@ public:
     auto result = request("GET", path, nullptr);
     require(result.is_array(), "backend returned a non-array command queue");
     return result;
+  }
+
+  Json critic_deployment(const std::string &profile_id) override {
+    CURL *curl = curl_easy_init();
+    require(curl != nullptr, "could not initialize HTTPS request");
+    char *profile = curl_easy_escape(curl, profile_id.c_str(),
+                                     static_cast<int>(profile_id.size()));
+    char *device = curl_easy_escape(curl, credentials_.device_id.c_str(),
+                                    static_cast<int>(credentials_.device_id.size()));
+    require(profile != nullptr && device != nullptr,
+            "could not encode critic deployment request");
+    const std::string path = "/harness-profiles/edge/" +
+                             std::string(profile) + "/critic-deployment?device_id=" +
+                             std::string(device);
+    curl_free(profile);
+    curl_free(device);
+    curl_easy_cleanup(curl);
+    return request("GET", path, nullptr);
+  }
+
+  void upload_enforcements(const std::string &robot_id,
+                           const Json &records) override {
+    request("POST", "/harness-profiles/edge/enforcements",
+            {{"device_id", credentials_.device_id},
+             {"robot_id", robot_id}, {"records", records}});
+  }
+
+  Json assignment() {
+    CURL *curl = curl_easy_init();
+    require(curl != nullptr, "could not initialize HTTPS request");
+    char *device = curl_easy_escape(curl, credentials_.device_id.c_str(),
+                                    static_cast<int>(credentials_.device_id.size()));
+    require(device != nullptr, "could not encode assignment request");
+    const std::string path = "/harness-profiles/edge/assignment?device_id=" +
+                             std::string(device);
+    curl_free(device);
+    curl_easy_cleanup(curl);
+    return request("GET", path, nullptr);
   }
 
 private:
@@ -184,12 +223,31 @@ Json WorkflowConnector::cycle(bool heartbeat) {
     uploaded_revision_ = snapshot.at("revision").get<Ns>();
     last_upload_monotonic_ns_ = monotonic_ns();
   }
+  const auto deployment =
+      transport_.critic_deployment(snapshot.at("profile_id").get<std::string>());
+  if (deployment.is_object() && !deployment.empty() &&
+      snapshot.value("critic_deployment", Json(nullptr)) != deployment) {
+    const auto request = Json{
+        {"schema_version", 1}, {"request_id", "critic-" + deployment.at("id").get<std::string>()},
+        {"actor", "backend_critic_deployer"}, {"expected_revision", snapshot.at("revision")},
+        {"operation", "install_critic"}, {"payload", {{"deployment", deployment}}}};
+    store_.apply(request);
+    snapshot = store_.snapshot();
+    uploaded_revision_ = -1; // report the installed deployment next cycle
+  }
+  const auto enforcements = store_.pending_enforcements();
+  if (!enforcements.empty()) {
+    transport_.upload_enforcements(robot_id_, enforcements);
+    store_.acknowledge_enforcements(enforcements);
+  }
   return {{"profile_id", snapshot.at("profile_id")},
           {"revision", snapshot.at("revision")},
           {"initial_upload", initial_upload},
           {"snapshot_uploaded", changed || heartbeat_due || !receipts.empty() ||
                                     !commands.empty()},
           {"commands_received", commands.size()},
+          {"enforcements_uploaded", enforcements.size()},
+          {"critic_deployment", snapshot.value("critic_deployment", Json(nullptr))},
           {"receipts", receipts}};
 }
 
@@ -214,6 +272,11 @@ DeviceCredentials load_device_credentials(
   return result;
 }
 
+Json fetch_device_assignment(const DeviceCredentials &credentials) {
+  CurlGlobal curl;
+  return BackendTransport(credentials).assignment();
+}
+
 Json run_workflow_sync(const Options &options, bool once) {
   options.allow("--store --robot-id --credentials --backend-url --interval-ms");
   const auto credential_value = options.get("--credentials");
@@ -229,7 +292,16 @@ Json run_workflow_sync(const Options &options, bool once) {
   BackendTransport transport(credentials);
   WorkflowConnector connector(Store(options.path("--store")),
                               options.need("--robot-id"), transport);
-  if (once) return connector.cycle(true);
+  if (once) {
+    try {
+      const auto result = connector.cycle(true);
+      record_event("workflow_sync", "cycle", "success", result);
+      return result;
+    } catch (const std::exception &error) {
+      record_event("workflow_sync", "cycle", "failure", {{"message", error.what()}});
+      throw;
+    }
+  }
 
   sync_interrupted = 0;
   const auto previous_interrupt = ::signal(SIGINT, stop_sync);
@@ -240,10 +312,15 @@ Json run_workflow_sync(const Options &options, bool once) {
       const auto result = connector.cycle(true);
       failures = 0;
       if (result.value("snapshot_uploaded", false) ||
-          result.value("commands_received", 0U) > 0)
+          result.value("commands_received", 0U) > 0 ||
+          result.value("enforcements_uploaded", 0U) > 0) {
+        record_event("workflow_sync", "cycle", "success", result);
         std::cout << result.dump() << std::endl;
+      }
     } catch (const std::exception &error) {
       ++failures;
+      record_event("workflow_sync", "cycle", "failure",
+                   {{"message", error.what()}, {"consecutive_failures", failures}});
       std::cerr << "workflow sync: " << error.what() << std::endl;
     }
     const auto backoff = std::min<Ns>(interval_ms * (1LL << std::min<Ns>(failures, 5)),
