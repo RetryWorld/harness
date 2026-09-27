@@ -11,12 +11,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <exception>
 #include <fcntl.h>
 #include <fstream>
 #include <future>
 #include <iostream>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialization.hpp>
+#include <rcutils/error_handling.h>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
@@ -35,11 +37,10 @@ namespace {
 using String = std_msgs::msg::String;
 struct RosContext {
   rclcpp::Context::SharedPtr value = std::make_shared<rclcpp::Context>();
-  explicit RosContext(Ns domain, bool initialize_logging = true) {
+  explicit RosContext(Ns domain) {
     require(domain >= 0 && domain <= 232, "domain-id must be within 0..232");
     rclcpp::InitOptions init;
     init.set_domain_id(static_cast<std::size_t>(domain));
-    init.auto_initialize_logging(initialize_logging);
     value->init(0, nullptr, init);
   }
   ~RosContext() {
@@ -83,6 +84,12 @@ Ns stamp(const builtin_interfaces::msg::Time &value) {
 bool finite(const std::vector<double> &values) {
   return std::all_of(values.begin(), values.end(),
                      [](double v) { return std::isfinite(v); });
+}
+Json json_numbers(const std::vector<double> &values) {
+  Json result = Json::array();
+  for (const auto value : values)
+    result.push_back(std::isfinite(value) ? Json(value) : Json(nullptr));
+  return result;
 }
 template <class T> T decode_bytes(const std::vector<std::uint8_t> &bytes) {
   rclcpp::SerializedMessage serialized(bytes.size());
@@ -641,10 +648,10 @@ Json ros_start(const Options &options) {
   return nullptr;
 }
 Json discover_domain(Ns domain, Ns settle_ms) {
-  // Setup discovery creates many short-lived contexts in parallel. ROS logging
-  // is process-global, so initializing it from each context produces a warning
-  // for every probed domain. The scanner does not emit ROS log records.
-  RosContext context(domain, false);
+  // Each setup domain runs in its own worker process. ROS logging and dynamic
+  // typesupport own process-global state, so domain contexts must not initialize
+  // them concurrently in one process.
+  RosContext context(domain);
   const auto scanner_name = "harness_setup_scan_" + unique_id().substr(0, 8);
   rclcpp::NodeOptions node_options;
   node_options.context(context.value);
@@ -769,11 +776,11 @@ Json discover_domain(Ns domain, Ns settle_ms) {
                     const auto state = decode<sensor_msgs::msg::JointState>(*message);
                     sample["series"].push_back({{"captured_wall_ns", wall_ns()},
                                                  {"name", state.name},
-                                                 {"value", state.position}});
+                                                 {"value", json_numbers(state.position)}});
                   } else if (type == "std_msgs/msg/Float64MultiArray") {
                     const auto values = decode<std_msgs::msg::Float64MultiArray>(*message);
                     sample["series"].push_back({{"captured_wall_ns", wall_ns()},
-                                                 {"value", values.data}});
+                                                 {"value", json_numbers(values.data)}});
                   }
                 } catch (const std::exception &error) {
                   sample["series_error"] = error.what();
@@ -833,18 +840,20 @@ Json discover_domain(Ns domain, Ns settle_ms) {
                       {"data_hex", hex(frame.data.data(), frame.data.size())}};
               } else if (type == "sensor_msgs/msg/JointState") {
                 const auto state = decode<sensor_msgs::msg::JointState>(*message);
-                sample["data"] = {{"name", state.name}, {"position", state.position},
-                                  {"velocity", state.velocity}, {"effort", state.effort}};
+                sample["data"] = {{"name", state.name},
+                                  {"position", json_numbers(state.position)},
+                                  {"velocity", json_numbers(state.velocity)},
+                                  {"effort", json_numbers(state.effort)}};
                 sample["series"] = Json::array();
                 sample["series"].push_back({{"captured_wall_ns", sample["captured_wall_ns"]},
                                               {"name", state.name},
-                                              {"value", state.position}});
+                                              {"value", json_numbers(state.position)}});
               } else if (type == "std_msgs/msg/Float64MultiArray") {
                 const auto values = decode<std_msgs::msg::Float64MultiArray>(*message);
-                sample["data"] = {{"value", values.data}};
+                sample["data"] = {{"value", json_numbers(values.data)}};
                 sample["series"] = Json::array();
                 sample["series"].push_back({{"captured_wall_ns", sample["captured_wall_ns"]},
-                                              {"value", values.data}});
+                                              {"value", json_numbers(values.data)}});
               } else if (type == "std_msgs/msg/String") {
                 const auto value = decode<String>(*message).data;
                 sample["data"] = value.substr(0, 4096);
@@ -866,7 +875,10 @@ Json discover_domain(Ns domain, Ns settle_ms) {
             }
           }));
     } catch (const std::exception &error) {
-      topic["sample"] = {{"status", "unavailable"}, {"error", error.what()}};
+      const std::string message = error.what();
+      if (rcutils_error_is_set())
+        rcutils_reset_error();
+      topic["sample"] = {{"status", "unavailable"}, {"error", message}};
     }
   }
   const auto sample_deadline = monotonic_ns() + 1500000000LL;
@@ -968,7 +980,13 @@ Json discover_domain(Ns domain, Ns settle_ms) {
   return result;
 }
 
-Json discover_batch_worker(Ns first, Ns last, Ns settle_ms, Ns parallelism) {
+struct DiscoveryWorker {
+  Ns domain;
+  pid_t pid;
+  int output;
+};
+
+DiscoveryWorker start_discovery_worker(Ns domain, Ns settle_ms) {
   const auto &executable = service_executable();
   require(!executable.empty(), "rearguard executable path is unavailable");
 
@@ -989,10 +1007,10 @@ Json discover_batch_worker(Ns first, Ns last, Ns settle_ms, Ns parallelism) {
       _exit(126);
     std::vector<std::string> args{
         executable.string(), "scan", "setup",
-        "--domain-min", std::to_string(first),
-        "--domain-max", std::to_string(last),
+        "--domain-min", std::to_string(domain),
+        "--domain-max", std::to_string(domain),
         "--settle-ms", std::to_string(settle_ms),
-        "--parallelism", std::to_string(parallelism)};
+        "--parallelism", "1"};
     std::vector<char *> pointers;
     pointers.reserve(args.size() + 1);
     for (auto &arg : args)
@@ -1003,10 +1021,14 @@ Json discover_batch_worker(Ns first, Ns last, Ns settle_ms, Ns parallelism) {
   }
 
   ::close(output[1]);
+  return {domain, pid, output[0]};
+}
+
+Json finish_discovery_worker(const DiscoveryWorker &worker) {
   std::string body;
   std::array<char, 65536> buffer{};
   for (;;) {
-    const auto count = ::read(output[0], buffer.data(), buffer.size());
+    const auto count = ::read(worker.output, buffer.data(), buffer.size());
     if (count > 0) {
       body.append(buffer.data(), static_cast<std::size_t>(count));
       continue;
@@ -1016,26 +1038,26 @@ Json discover_batch_worker(Ns first, Ns last, Ns settle_ms, Ns parallelism) {
     require(count == 0, "could not read ROS discovery worker output");
     break;
   }
-  ::close(output[0]);
+  ::close(worker.output);
 
   int status = 0;
-  while (::waitpid(pid, &status, 0) < 0) {
+  while (::waitpid(worker.pid, &status, 0) < 0) {
     if (errno == EINTR)
       continue;
     throw std::runtime_error("could not wait for ROS discovery worker");
   }
-  const auto range = std::to_string(first) + "-" + std::to_string(last);
+  const auto domain = std::to_string(worker.domain);
   if (WIFSIGNALED(status))
     throw std::runtime_error("ROS discovery worker crashed with signal " +
                              std::to_string(WTERMSIG(status)) +
-                             " while scanning domains " + range);
+                             " while scanning domain " + domain);
   require(WIFEXITED(status) && WEXITSTATUS(status) == 0,
-          "ROS discovery worker failed while scanning domains " + range);
+          "ROS discovery worker failed while scanning domain " + domain);
   try {
     return Json::parse(body);
   } catch (const Json::exception &error) {
-    throw std::runtime_error("invalid ROS discovery worker output for domains " +
-                             range + ": " + error.what());
+    throw std::runtime_error("invalid ROS discovery worker output for domain " +
+                             domain + ": " + error.what());
   }
 }
 
@@ -1056,14 +1078,27 @@ Json ros_discover(const Options &options) {
   for (Ns batch = first; batch <= last; batch += parallelism) {
     const auto end = std::min(last + 1, batch + parallelism);
     if (isolate_batches) {
-      const auto result =
-          discover_batch_worker(batch, end - 1, settle_ms, parallelism);
-      if (first_snapshot.is_null())
-        first_snapshot = result;
-      for (const auto &id : result.at("available_domain_ids"))
-        ids.push_back(id);
-      for (const auto &domain : result.at("domains"))
-        domains.push_back(domain);
+      std::vector<DiscoveryWorker> workers;
+      workers.reserve(static_cast<std::size_t>(end - batch));
+      for (Ns domain = batch; domain < end; ++domain)
+        workers.push_back(start_discovery_worker(domain, settle_ms));
+      std::exception_ptr worker_failure;
+      for (const auto &worker_process : workers) {
+        try {
+          const auto result = finish_discovery_worker(worker_process);
+          if (first_snapshot.is_null())
+            first_snapshot = result;
+          for (const auto &id : result.at("available_domain_ids"))
+            ids.push_back(id);
+          for (const auto &domain : result.at("domains"))
+            domains.push_back(domain);
+        } catch (...) {
+          if (!worker_failure)
+            worker_failure = std::current_exception();
+        }
+      }
+      if (worker_failure)
+        std::rethrow_exception(worker_failure);
       continue;
     }
 
