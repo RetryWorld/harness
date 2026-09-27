@@ -58,8 +58,11 @@ void Recording::write(const std::string &topic, const std::string &type,
   current_bytes_ += data->size();
   writer_->write(data, topic, type, now, now);
   current_["end_ns"] = now;
-  current_["message_counts"][topic] =
-      current_["message_counts"].value(topic, 0U) + 1U;
+  auto &message_counts = current_.at("message_counts");
+  const auto count = message_counts.contains(topic)
+                         ? message_counts.at(topic).get_ref<const Json::number_unsigned_t &>()
+                         : Json::number_unsigned_t{0};
+  message_counts[topic] = count + 1U;
 }
 void Recording::close() {
   if (!writer_)
@@ -106,7 +109,8 @@ fs::path export_window(const fs::path &session, const Json &window,
   }
   writer.close();
   for (const auto &t : config["topics"])
-    if (t.value("required", true))
+    if (!t.contains("required") ||
+        t.at("required").get_ref<const Json::boolean_t &>())
       require(counts[t["name"].get<std::string>()] >= 2,
               "exported MCAP lacks required topic coverage");
   std::vector<fs::path> files;
