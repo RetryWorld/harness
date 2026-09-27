@@ -286,6 +286,41 @@ int run_automatic_setup_scan(const ConnectOptions& options, const std::string& a
         fs::create_directories(service_directory);
         harness::observation::atomic_json(service_directory / "setup-inventory.json",
                                           inventory);
+        const bool has_active_domain = !inventory["domains"].empty();
+        bool has_captured_sample = false;
+        for (const auto& domain : inventory["domains"]) {
+            if (!domain.contains("topics") || !domain["topics"].is_array()) continue;
+            for (const auto& topic : domain["topics"]) {
+                if (topic.contains("sample") && topic["sample"].is_object() &&
+                    topic["sample"].value("status", "") == "captured") {
+                    has_captured_sample = true;
+                    break;
+                }
+            }
+            if (has_captured_sample) break;
+        }
+        if (!has_active_domain || !has_captured_sample) {
+            const std::string message = !has_active_domain
+                ? "No active ROS 2 domain was found. Start the robot or simulation and run `rearguard connect` again."
+                : "ROS 2 was found, but no topic sample was captured. Start a publisher and run `rearguard connect` again.";
+            ++sequence;
+            report_scan_event(api_url, anon_key, device_id, secret, scan_id, sequence,
+                              "failed", 100, inventory, -1, -1, message, synced);
+            if (options.json) {
+                std::printf("%s\n", Json{{"status", "scan_failed"},
+                                          {"scan_id", scan_id},
+                                          {"sequence", sequence},
+                                          {"error", message},
+                                          {"inventory", inventory}}
+                                         .dump()
+                                         .c_str());
+            } else {
+                std::fprintf(stderr, "%s  ✗ 3. %s\n", is_interactive() ? "\r\033[K" : "",
+                             message.c_str());
+                std::fprintf(stderr, "  Setup is paused until ROS 2 is active and a sample can be captured.\n");
+            }
+            return 1;
+        }
         ++sequence;
         synced = report_scan_event(api_url, anon_key, device_id, secret, scan_id,
                                    sequence, "completed", 100, inventory, -1, -1, {},
@@ -549,6 +584,7 @@ int run_connect(const ConnectOptions& options) {
             {{"device_id", device_id}, {"device_name", device_name}});
         const int scan_result =
             run_automatic_setup_scan(options, api_url, anon_key, device_id, secret);
+        if (scan_result != 0) return scan_result;
         try {
             const auto service = harness::observation::start_service_after_connect();
             harness::observation::record_event("service", "auto_start", "success", service);

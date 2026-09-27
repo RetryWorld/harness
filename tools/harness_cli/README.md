@@ -81,7 +81,8 @@ The architecture and durable profile-sync contract are in
 `rearguard connect` starts one background supervisor after pairing and setup
 discovery. It waits until the web app assigns the device to a robot, resolves
 the packaged binding from that robot's embodiment, then keeps the observer and
-workflow sync connector running. It automatically creates the local workflow
+workflow sync connector running. A third supervised process drains closed MCAP
+segments to R2 from its durable local operation journal. It automatically creates the local workflow
 store, starts a fresh recording session after an observer restart, and exports
 candidate windows as soon as they are ready.
 
@@ -474,8 +475,10 @@ sync are displayed as one numbered interactive flow. The setup page can
 therefore update before the sweep is finished. `--scan-parallelism` (1..32)
 and `--scan-settle-ms` (0..10000) tune
 the sweep; `--json` emits newline-delimited pairing and scan progress records.
-The background service is then started automatically; it is safe for it to wait
-in `waiting_for_assignment` while setup is completed in the browser.
+Setup advances and the background service starts only after the scan finds at
+least one active ROS 2 domain and captures one topic sample. If either is
+missing, start the robot software or simulation and run `rearguard connect`
+again; the failed inventory remains available for diagnosis.
 
 ---
 

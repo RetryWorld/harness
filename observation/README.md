@@ -47,7 +47,8 @@ observation commands print JSON; ROS may also print its own log messages.
 The native implementation is split into `common` (JSON/hash/config handling),
 `evidence` (window timing and coverage), `store` (SQLite review transactions),
 `runtime` (adapter interfaces and supervision), `recording` (ROS bag segments
-and MCAP export), `ros` (subscriptions and request transport), and `commands`
+and MCAP export), `recording_upload` (durable R2 publication), `ros`
+(subscriptions and request transport), and `commands`
 (CLI dispatch). ROS libraries link to the observation layer, never the kernel.
 
 CTest runs the C++ evidence/workflow tests. A ROS-enabled build also runs a real
@@ -153,6 +154,15 @@ messages, clock and audit events). `recording.json` indexes closed segments by
 clock epoch and timestamp. New runs default to MCAP (`--storage sqlite3` remains
 available); ROS needs its MCAP storage plugin for MCAP recording/export.
 Recording is continuous for this session; windows reference its timestamps.
+When started by the persistent post-connect service, every closed MCAP segment
+is discovered by a separately supervised uploader process and uses the
+asynchronous verified R2 flow in
+[`docs/r2-recording-pipeline.md`](../../docs/r2-recording-pipeline.md).
+`cloud-recordings.json` is a durable per-segment operation journal containing
+attempt counts, local/object paths, grant expiry, state, and the last error.
+The first segment targets five seconds; later segments rotate at 30 seconds or
+96 MiB. Upload stalls therefore cannot block observation, workflow sync, or
+service status maintenance.
 Retain the entire directory. This first implementation has no automatic
 retention rotation: choose a bounded `--wall-timeout` and manage saved sessions.
 It checks free space and stops below 250 MB rather than intentionally filling

@@ -46,11 +46,12 @@ enforces them"* a property of the build rather than a claim in a document.
 ## Install
 
 ```bash
-curl -fsSL https://rearguard.dev/install | sh
+curl -fsSL https://rearguard.dev/install | sh && export PATH="$HOME/.harness/bin:$PATH"
 ```
 
 Downloads the release tarball, verifies its SHA256 against the published
 manifest, unpacks to `~/.harness`, and adds `~/.harness/bin` to your `PATH`.
+The one-liner's final `export` makes it available in the current terminal too.
 Override with `HARNESS_INSTALL_DIR`, pin a version with `./install.sh v0.2.0`.
 
 It compiles nothing and touches no package manager.

@@ -7,6 +7,7 @@ class Recording {
   fs::path session_;
   Json topics_, segments_ = Json::array(), current_;
   std::string storage_;
+  std::size_t current_bytes_ = 0;
   std::unique_ptr<rosbag2_cpp::Writer> writer_;
 
 public:

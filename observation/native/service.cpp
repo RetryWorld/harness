@@ -1,6 +1,7 @@
 #include "service.hpp"
 
 #include "events.hpp"
+#include "recording_upload.hpp"
 #include "store.hpp"
 #include "sync.hpp"
 
@@ -19,7 +20,7 @@ namespace harness::observation {
 namespace {
 fs::path executable_path;
 volatile sig_atomic_t service_stopping = 0;
-pid_t observer_pid = -1, sync_pid = -1;
+pid_t observer_pid = -1, sync_pid = -1, uploader_pid = -1;
 
 fs::path service_root() { return state_root() / "service"; }
 fs::path config_path() { return service_root() / "config.json"; }
@@ -49,6 +50,7 @@ void stop_handler(int) {
   service_stopping = 1;
   if (observer_pid > 0) ::kill(observer_pid, SIGTERM);
   if (sync_pid > 0) ::kill(sync_pid, SIGTERM);
+  if (uploader_pid > 0) ::kill(uploader_pid, SIGTERM);
 }
 
 std::vector<char *> argv_for(std::vector<std::string> &args) {
@@ -83,7 +85,8 @@ void write_status(const std::string &state, const Json &config, Json extra = Jso
   Json value{{"schema_version", 1}, {"state", state}, {"pid", ::getpid()},
              {"updated_wall_ns", wall_ns()}, {"config", config},
              {"observer_pid", observer_pid > 0 ? Json(observer_pid) : Json(nullptr)},
-             {"sync_pid", sync_pid > 0 ? Json(sync_pid) : Json(nullptr)}};
+             {"sync_pid", sync_pid > 0 ? Json(sync_pid) : Json(nullptr)},
+             {"uploader_pid", uploader_pid > 0 ? Json(uploader_pid) : Json(nullptr)}};
   value.update(extra);
   atomic_json(status_path(), value);
 }
@@ -172,6 +175,7 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
   while (!service_stopping) {
     reap(observer_pid, "observer");
     reap(sync_pid, "workflow_sync");
+    reap(uploader_pid, "recording_uploader");
 
     if ((!config.contains("robot_id") || config["robot_id"].is_null()) &&
         monotonic_ns() >= next_assignment) {
@@ -195,7 +199,7 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
           record_event("assignment", "resolved", "success", assignment);
         } else {
           write_status("waiting_for_assignment", config,
-                       {{"message", "Assign this device to a robot in the web app."}});
+                       {{"message", "Assign this device to a robot."}});
         }
       } catch (const std::exception &error) {
         record_event("assignment", "poll", "failure", {{"message", error.what()}});
@@ -265,6 +269,19 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
                       {"session", active_session.string()}});
         active_critic_id = critic_id;
       }
+      if (uploader_pid <= 0) {
+        std::vector<std::string> args{
+            executable_path.string(), "service", "uploader", "--store", store.string(),
+            "--sessions-root", (service_root() / "sessions").string(), "--credentials",
+            config.value("credentials", default_credentials_path().string()),
+            "--interval-ms", "2000"};
+        if (config.contains("backend_url"))
+          args.insert(args.end(), {"--backend-url", config["backend_url"].get<std::string>()});
+        uploader_pid = spawn(args);
+        record_event("recording_uploader", "started", "success",
+                     {{"pid", uploader_pid},
+                      {"sessions_root", (service_root() / "sessions").string()}});
+      }
       export_pending_windows(store, active_session);
       write_status("running", config, {{"domain_id", *domain},
                    {"store", store.string()}, {"session", active_session.string()},
@@ -276,7 +293,8 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
 
   if (observer_pid > 0) wait_child(observer_pid);
   if (sync_pid > 0) wait_child(sync_pid);
-  observer_pid = sync_pid = -1;
+  if (uploader_pid > 0) wait_child(uploader_pid);
+  observer_pid = sync_pid = uploader_pid = -1;
   write_status("stopped", config);
   record_event("service", "stopped", "success");
   std::error_code ec;
@@ -320,6 +338,8 @@ void set_service_executable(const fs::path &path) {
 #endif
 }
 
+const fs::path &service_executable() { return executable_path; }
+
 Json start_service_after_connect() {
   Json changes = Json::object();
   const auto credentials = load_or_empty(default_credentials_path());
@@ -345,6 +365,7 @@ Json stop_service_if_running() {
 }
 
 Json service_command(const Options &options) {
+  if (options.command == "uploader") return run_recording_uploader(options);
   if (options.command == "start") {
     options.allow("--config --robot-id --domain-id --storage --credentials --backend-url");
     Json changes = Json::object();

@@ -3,9 +3,12 @@
 #include "recording.hpp"
 #include "runtime.hpp"
 #include "events.hpp"
+#include "service.hpp"
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <fcntl.h>
@@ -21,6 +24,7 @@
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <sys/file.h>
+#include <sys/wait.h>
 #include <sys/utsname.h>
 #include <thread>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
@@ -753,7 +757,30 @@ Json discover_domain(Ns domain, Ns settle_ms) {
           rclcpp::QoS(1).best_effort().durability_volatile(),
           [&, index, type](std::shared_ptr<rclcpp::SerializedMessage> message) {
             auto &sample = topics[index]["sample"];
-            if (sample["status"] != "timeout") return;
+            if (sample["status"] != "timeout") {
+              // Preserve a short numeric history for setup charts. The first
+              // message remains the canonical sample and the bounded series
+              // adds temporal evidence without turning discovery into the
+              // long-lived MCAP data plane.
+              if (sample["status"] == "captured" && sample.contains("series") &&
+                  sample["series"].size() < 64) {
+                try {
+                  if (type == "sensor_msgs/msg/JointState") {
+                    const auto state = decode<sensor_msgs::msg::JointState>(*message);
+                    sample["series"].push_back({{"captured_wall_ns", wall_ns()},
+                                                 {"name", state.name},
+                                                 {"value", state.position}});
+                  } else if (type == "std_msgs/msg/Float64MultiArray") {
+                    const auto values = decode<std_msgs::msg::Float64MultiArray>(*message);
+                    sample["series"].push_back({{"captured_wall_ns", wall_ns()},
+                                                 {"value", values.data}});
+                  }
+                } catch (const std::exception &error) {
+                  sample["series_error"] = error.what();
+                }
+              }
+              return;
+            }
             const auto &bytes = message->get_rcl_serialized_message();
             auto &budget = type == "sensor_msgs/msg/Image" ||
                                    type == "sensor_msgs/msg/CompressedImage"
@@ -808,6 +835,16 @@ Json discover_domain(Ns domain, Ns settle_ms) {
                 const auto state = decode<sensor_msgs::msg::JointState>(*message);
                 sample["data"] = {{"name", state.name}, {"position", state.position},
                                   {"velocity", state.velocity}, {"effort", state.effort}};
+                sample["series"] = Json::array();
+                sample["series"].push_back({{"captured_wall_ns", sample["captured_wall_ns"]},
+                                              {"name", state.name},
+                                              {"value", state.position}});
+              } else if (type == "std_msgs/msg/Float64MultiArray") {
+                const auto values = decode<std_msgs::msg::Float64MultiArray>(*message);
+                sample["data"] = {{"value", values.data}};
+                sample["series"] = Json::array();
+                sample["series"].push_back({{"captured_wall_ns", sample["captured_wall_ns"]},
+                                              {"value", values.data}});
               } else if (type == "std_msgs/msg/String") {
                 const auto value = decode<String>(*message).data;
                 sample["data"] = value.substr(0, 4096);
@@ -836,9 +873,6 @@ Json discover_domain(Ns domain, Ns settle_ms) {
   while (!sample_subscriptions.empty() && rclcpp::ok(context.value) &&
          monotonic_ns() < sample_deadline) {
     executor.spin_once(std::chrono::milliseconds(25));
-    if (std::none_of(topics.begin(), topics.end(), [](const Json &topic) {
-          return topic["sample"]["status"] == "timeout";
-        })) break;
   }
   sample_subscriptions.clear();
 
@@ -933,6 +967,78 @@ Json discover_domain(Ns domain, Ns settle_ms) {
   result["inventory_hash"] = digest(result);
   return result;
 }
+
+Json discover_batch_worker(Ns first, Ns last, Ns settle_ms, Ns parallelism) {
+  const auto &executable = service_executable();
+  require(!executable.empty(), "rearguard executable path is unavailable");
+
+  int output[2] = {-1, -1};
+  require(::pipe(output) == 0, "could not create ROS discovery worker pipe");
+  const pid_t pid = ::fork();
+  if (pid < 0) {
+    ::close(output[0]);
+    ::close(output[1]);
+    throw std::runtime_error("could not start ROS discovery worker");
+  }
+  if (pid == 0) {
+    ::close(output[0]);
+    if (::dup2(output[1], STDOUT_FILENO) < 0)
+      _exit(126);
+    ::close(output[1]);
+    if (::setenv("REARGUARD_DISCOVERY_WORKER", "1", 1) != 0)
+      _exit(126);
+    std::vector<std::string> args{
+        executable.string(), "scan", "setup",
+        "--domain-min", std::to_string(first),
+        "--domain-max", std::to_string(last),
+        "--settle-ms", std::to_string(settle_ms),
+        "--parallelism", std::to_string(parallelism)};
+    std::vector<char *> pointers;
+    pointers.reserve(args.size() + 1);
+    for (auto &arg : args)
+      pointers.push_back(arg.data());
+    pointers.push_back(nullptr);
+    ::execv(executable.c_str(), pointers.data());
+    _exit(127);
+  }
+
+  ::close(output[1]);
+  std::string body;
+  std::array<char, 65536> buffer{};
+  for (;;) {
+    const auto count = ::read(output[0], buffer.data(), buffer.size());
+    if (count > 0) {
+      body.append(buffer.data(), static_cast<std::size_t>(count));
+      continue;
+    }
+    if (count < 0 && errno == EINTR)
+      continue;
+    require(count == 0, "could not read ROS discovery worker output");
+    break;
+  }
+  ::close(output[0]);
+
+  int status = 0;
+  while (::waitpid(pid, &status, 0) < 0) {
+    if (errno == EINTR)
+      continue;
+    throw std::runtime_error("could not wait for ROS discovery worker");
+  }
+  const auto range = std::to_string(first) + "-" + std::to_string(last);
+  if (WIFSIGNALED(status))
+    throw std::runtime_error("ROS discovery worker crashed with signal " +
+                             std::to_string(WTERMSIG(status)) +
+                             " while scanning domains " + range);
+  require(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "ROS discovery worker failed while scanning domains " + range);
+  try {
+    return Json::parse(body);
+  } catch (const Json::exception &error) {
+    throw std::runtime_error("invalid ROS discovery worker output for domains " +
+                             range + ": " + error.what());
+  }
+}
+
 Json ros_discover(const Options &options) {
   const auto first = options.integer("--domain-min", 0);
   const auto last = options.integer("--domain-max", 232);
@@ -944,9 +1050,24 @@ Json ros_discover(const Options &options) {
           "parallelism must be between 1 and 32");
 
   Json domains = Json::array(), ids = Json::array(), first_snapshot = nullptr;
+  const auto *worker = std::getenv("REARGUARD_DISCOVERY_WORKER");
+  const bool isolate_batches = !service_executable().empty() &&
+                               !(worker && std::string(worker) == "1");
   for (Ns batch = first; batch <= last; batch += parallelism) {
-    std::vector<std::future<Json>> pending;
     const auto end = std::min(last + 1, batch + parallelism);
+    if (isolate_batches) {
+      const auto result =
+          discover_batch_worker(batch, end - 1, settle_ms, parallelism);
+      if (first_snapshot.is_null())
+        first_snapshot = result;
+      for (const auto &id : result.at("available_domain_ids"))
+        ids.push_back(id);
+      for (const auto &domain : result.at("domains"))
+        domains.push_back(domain);
+      continue;
+    }
+
+    std::vector<std::future<Json>> pending;
     for (Ns domain = batch; domain < end; ++domain)
       pending.push_back(std::async(std::launch::async, [domain, settle_ms] {
         return discover_domain(domain, settle_ms);

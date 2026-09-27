@@ -2,7 +2,7 @@
 # One-line install of the harness kernel release artifact, mirroring the
 # `curl | sh` UX of tools like rustup/deno/bun:
 #
-#   curl -fsSL https://rearguard.dev/install | sh
+#   curl -fsSL https://rearguard.dev/install | sh && export PATH="$HOME/.harness/bin:$PATH"
 #
 # This does NOT compile anything and does NOT touch a package manager. It
 # downloads the same tarball `build_artifact.sh` produces and GitHub Actions
@@ -120,19 +120,32 @@ step "Checking installed CLI"
 "$BIN" abi
 okay "CLI is ready"
 
-# Persist the path in the user's shell startup file. A script executed through
-# `curl | sh` cannot mutate its parent shell, so installation remains one
-# command and newly started shells receive the installed CLI automatically.
+# Persist the path in login and interactive shell startup files. A script
+# executed through `curl | sh` cannot mutate its parent shell; the public
+# one-liner therefore ends with an export for the current terminal, while
+# these edits make every later terminal work without another command.
 PATH_LINE="export PATH=\"$INSTALL_DIR/bin:\$PATH\""
-RC_FILE=""
+persist_path() {
+  _rc_file="$1"
+  if ! grep -qF "$INSTALL_DIR/bin" "$_rc_file" 2>/dev/null; then
+    touch "$_rc_file"
+    printf '\n# added by harness-kernel install.sh\n%s\n' "$PATH_LINE" >> "$_rc_file"
+  fi
+}
+
+persist_path "$HOME/.profile"
 case "${SHELL:-}" in
-  */zsh) RC_FILE="$HOME/.zshrc" ;;
-  */bash) RC_FILE="$HOME/.bashrc" ;;
+  */zsh)
+    persist_path "$HOME/.zshrc"
+    [ ! -f "$HOME/.zprofile" ] || persist_path "$HOME/.zprofile"
+    ;;
+  */bash)
+    persist_path "$HOME/.bashrc"
+    [ ! -f "$HOME/.bash_profile" ] || persist_path "$HOME/.bash_profile"
+    ;;
 esac
 
-if [ -n "$RC_FILE" ] && ! grep -qF "$INSTALL_DIR/bin" "$RC_FILE" 2>/dev/null; then
-  touch "$RC_FILE"
-  printf '\n# added by harness-kernel install.sh\n%s\n' "$PATH_LINE" >> "$RC_FILE"
-fi
-
 printf '\n%b\n' "${GREEN}✓ Installed Rearguard CLI ${RELEASE_VERSION}${RESET} ${DIM}($TARGET)${RESET}"
+if ! command -v rearguard >/dev/null 2>&1; then
+  printf '%b\n' "${DIM}  PATH saved for future terminals; the install one-liner exports it in this terminal.${RESET}"
+fi

@@ -5,6 +5,8 @@
 #include <sstream>
 namespace harness::observation {
 namespace {
+constexpr std::size_t kSegmentByteTarget = 96U * 1024U * 1024U;
+
 rosbag2_storage::StorageOptions storage_options(const fs::path &path,
                                                 const std::string &storage) {
   rosbag2_storage::StorageOptions options;
@@ -22,8 +24,12 @@ Recording::Recording(fs::path session, Json topics, std::string storage)
 void Recording::write(const std::string &topic, const std::string &type,
                       std::shared_ptr<const rclcpp::SerializedMessage> data,
                       Ns now, Ns epoch) {
+  // Close the first segment quickly to prove the path during setup. Once the
+  // first artifact exists, use longer segments to avoid object/row explosion.
+  const Ns target_ns = segments_.empty() ? 5000000000LL : 30000000000LL;
   if (writer_ && (epoch != current_["epoch"].get<Ns>() ||
-                  now - current_["start_ns"].get<Ns>() >= 5000000000LL))
+                  now - current_["start_ns"].get<Ns>() >= target_ns ||
+                  current_bytes_ >= kSegmentByteTarget))
     close();
   if (!writer_) {
     std::ostringstream name;
@@ -33,8 +39,12 @@ void Recording::write(const std::string &topic, const std::string &type,
                 {"start_ns", now},
                 {"end_ns", now},
                 {"path", name.str()},
-                {"storage_id", storage_}};
+                {"storage_id", storage_},
+                {"target_duration_ns", target_ns},
+                {"target_size_bytes", kSegmentByteTarget},
+                {"message_counts", Json::object()}};
     writer_ = std::make_unique<rosbag2_cpp::Writer>();
+    current_bytes_ = 0;
     writer_->open(storage_options(session_ / name.str(), storage_),
                   {"cdr", "cdr"});
     for (const auto &item : topics_) {
@@ -45,14 +55,18 @@ void Recording::write(const std::string &topic, const std::string &type,
       writer_->create_topic(metadata);
     }
   }
+  current_bytes_ += data->size();
   writer_->write(data, topic, type, now, now);
   current_["end_ns"] = now;
+  current_["message_counts"][topic] =
+      current_["message_counts"].value(topic, 0U) + 1U;
 }
 void Recording::close() {
   if (!writer_)
     return;
   writer_->close();
   writer_.reset();
+  current_["serialized_bytes"] = current_bytes_;
   segments_.push_back(current_);
   atomic_json(session_ / "recording.json",
               {{"schema_version", 1}, {"segments", segments_}});

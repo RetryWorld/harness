@@ -206,7 +206,9 @@ int command_main(const std::string &group, int argc, char **argv) {
                     ? std::map<std::string, std::string>{
                           {"start", "[--config FILE|so101] [--robot-id UUID] "
                                     "[--domain-id N] [--storage mcap|sqlite3]"},
-                          {"status", ""}, {"stop", ""}}
+                          {"status", ""}, {"stop", ""},
+                          {"uploader", "--store DIR (--session DIR|--sessions-root DIR) [--credentials FILE] "
+                                       "[--backend-url URL] [--interval-ms 2000]"}}
                     : std::map<std::string, std::string>{
                     {"init", "--store DIR --config FILE|so101"},
                     {"show", "--store DIR"},
@@ -235,7 +237,7 @@ int command_main(const std::string &group, int argc, char **argv) {
           << (group == "observe" ? " <start|profile|status|windows|proposals|"
                                    "capture|candidate|promote|activate>\n"
               : group == "scan" ? " <setup|runtime>\n"
-              : group == "service" ? " <start|status|stop>\n"
+              : group == "service" ? " <start|status|stop|uploader>\n"
                                  : " <init|show|outbox|artifact|apply|export-"
                                    "window|generation-request|sync|sync-once>\n")
           << "See edge/observation/README.md and WORKFLOW.md for options.\n";

@@ -151,7 +151,7 @@ std::vector<RcHit> find_rc_entries(const fs::path& prefix) {
     if (home.empty()) return hits;
 
     const std::string bin_dir = (prefix / "bin").string();
-    for (const char* rc : {".zshrc", ".bashrc", ".profile", ".bash_profile"}) {
+    for (const char* rc : {".zshrc", ".zprofile", ".bashrc", ".profile", ".bash_profile"}) {
         const fs::path path = fs::path(home) / rc;
         std::ifstream in(path);
         if (!in) continue;

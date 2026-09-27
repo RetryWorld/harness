@@ -16,7 +16,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(harness_kernel
-        VERSION 0.4.0
+        VERSION 0.4.1
         DESCRIPTION "Physical AI harness kernel (v2 — schema-driven)"
         LANGUAGES CXX C)
 
@@ -226,6 +226,7 @@ option(HARNESS_WITH_ROS2 "Build native ROS 2 observation and MCAP export (source
 add_library(harness_observation STATIC
   observation/native/common.cpp observation/native/store.cpp
   observation/native/evidence.cpp observation/native/runtime.cpp observation/native/sync.cpp
+  observation/native/recording_upload.cpp
   observation/native/events.cpp observation/native/service.cpp
   observation/native/commands.cpp)
 target_include_directories(harness_observation PUBLIC observation/native)
