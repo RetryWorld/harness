@@ -47,6 +47,7 @@ jobs:
         run: >-
           sudo apt-get install -y
           ros-jazzy-rclcpp ros-jazzy-rosbag2-cpp
+          ros-jazzy-rosbag2-storage-mcap
           ros-jazzy-sensor-msgs ros-jazzy-std-msgs
           ros-jazzy-trajectory-msgs ros-jazzy-rosgraph-msgs
 
@@ -76,6 +77,13 @@ jobs:
             exit 1
           fi
           cat "${build_log}"
+
+      - name: Verify packaged edge runtime contract
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          ./build-release/rearguard scan setup --domain-min 0 --domain-max 0 --settle-ms 1 --parallelism 1 --out "${RUNNER_TEMP}/scan.json"
+          tar -tzf dist/harness-kernel-*.tar.gz | grep -q '/share/harness/runtime/edge-runtime.json$'
+          tar -tzf dist/harness-kernel-*.tar.gz | grep -q '/share/harness/install/install_runtime_deps.sh$'
 
       - uses: actions/upload-artifact@v4
         with:

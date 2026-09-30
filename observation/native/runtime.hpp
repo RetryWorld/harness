@@ -1,5 +1,6 @@
 #pragma once
 #include "store.hpp"
+#include <memory>
 #include <optional>
 #include <vector>
 namespace harness::observation {
@@ -28,7 +29,7 @@ struct Detection {
 };
 struct ObservationMessage {
   std::string topic, type;
-  std::vector<std::uint8_t> cdr;
+  std::shared_ptr<const std::vector<std::uint8_t>> cdr;
   Ns receipt_ros_ns;
 };
 struct Observations {
@@ -41,6 +42,7 @@ struct CriticAdapter {
   virtual bool ready() const = 0;
   virtual bool load(const fs::path &, const Json &, const Json &) = 0;
   virtual std::optional<Detection> evaluate(const Observations &) = 0;
+  virtual Json telemetry() const { return nullptr; }
 };
 struct ControllerAdapter {
   virtual ~ControllerAdapter() = default;

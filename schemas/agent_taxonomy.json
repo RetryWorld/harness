@@ -1,0 +1,283 @@
+{
+  "schema_version": 1,
+  "flows": {
+    "harness_configuration": {
+      "description": "Connect a robot and define its environment, task, and failures.",
+      "entry_step": "connect",
+      "global_actions": {
+        "update_hardware": { "description": "Update the hardware description without leaving the current setup step.", "handler": "collect_hardware", "artifacts": ["configuration_field"] },
+        "update_environment": { "description": "Update the operating environment without leaving the current setup step.", "handler": "collect_environment", "artifacts": ["configuration_field"] },
+        "update_task": { "description": "Update the task description without leaving the current setup step.", "handler": "collect_task", "artifacts": ["configuration_field"] },
+        "replace_failures": { "description": "Replace the configured failure and unsafe-outcome list without leaving the current setup step.", "handler": "replace_failures", "artifacts": ["configuration_field"] }
+      },
+      "steps": {
+        "install": {
+          "opening": "Welcome the user, provide the edge CLI installation command, and ask them to confirm when it is installed.",
+          "opening_artifacts": ["install_instructions"],
+          "actions": {
+            "installed": { "description": "The CLI is installed.", "next_step": "connect", "handler": "state_only", "artifacts": [] },
+            "installation_help": { "description": "Install instructions or troubleshooting are needed.", "handler": "show_install_instructions", "artifacts": ["install_instructions"] }
+          }
+        },
+        "connect": {
+          "opening": "Give the edge harness installation command for users who have not installed it yet, then explain how to run rearguard connect on the robot computer and ask for the eight-character pairing code.",
+          "opening_artifacts": ["connect_instructions"],
+          "actions": {
+            "pairing_code": { "description": "An eight-character pairing code was supplied.", "next_step": "discovery", "handler": "claim_device_pairing", "artifacts": ["paired_device"] },
+            "connection_help": { "description": "Help obtaining or using a pairing code is needed.", "handler": "show_connect_instructions", "artifacts": ["connect_instructions"] }
+          }
+        },
+        "discovery": {
+          "opening": "Explain that setup is waiting for a live ROS 2 graph and one captured topic sample. Ask the user to start their robot software or simulation, then tell you when it is running.",
+          "opening_artifacts": [],
+          "actions": {
+            "check_discovery": { "description": "Check whether ROS 2 discovery captured a usable sample.", "handler": "check_setup_discovery", "artifacts": ["ros2_setup_discovery"] },
+            "discovery_help": { "description": "Help starting ROS 2 or a simulation is needed.", "handler": "check_setup_discovery", "artifacts": ["ros2_setup_discovery"] }
+          }
+        },
+        "robot": {
+          "opening": "Say that the live ROS 2 connection and sample are ready, then naturally ask what hardware they are connecting. Ask for a manufacturer and model, or a short description of a custom build and its main parts. Do not use the terms embodiment, robot step, workflow state, or artifact.",
+          "opening_artifacts": [],
+          "actions": {
+            "hardware_description": { "description": "The connected hardware was identified or described.", "next_step": "environment", "handler": "collect_hardware", "artifacts": ["configuration_field"] }
+          }
+        },
+        "environment": {
+          "opening": "Ask for a concise description of the physical environment where the robot operates.",
+          "opening_artifacts": [],
+          "actions": {
+            "environment_description": { "description": "The physical workspace was described.", "next_step": "task", "handler": "collect_environment", "artifacts": ["configuration_field"] },
+            "needs_environment_help": { "description": "The user asks what environment details are needed.", "handler": "state_only", "artifacts": [] }
+          }
+        },
+        "task": {
+          "opening": "Ask what task the robot should perform in the described environment.",
+          "opening_artifacts": [],
+          "actions": {
+            "task_description": { "description": "The robot task was described.", "next_step": "failures", "handler": "collect_task", "artifacts": ["configuration_field"] },
+            "needs_task_help": { "description": "The user asks what task details are needed.", "handler": "state_only", "artifacts": [] }
+          }
+        },
+        "failures": {
+          "opening": "Ask for the failures or unsafe outcomes the harness must avoid, one or more at a time.",
+          "opening_artifacts": [],
+          "actions": {
+            "failure_description": { "description": "A failure or unsafe outcome was described.", "handler": "collect_failure", "artifacts": ["configuration_field"] },
+            "no_more_failures": { "description": "The failure list is complete.", "next_step": "ready", "handler": "complete_harness_configuration", "artifacts": ["harness_configuration", "missing_configuration_input"] },
+            "needs_failure_help": { "description": "The user asks what failure details are needed.", "handler": "state_only", "artifacts": [] }
+          }
+        },
+        "ready": {
+          "opening": "Explain that configuration is complete and offer telemetry, failure, recovery, deployment, or enforcement review.",
+          "opening_artifacts": [],
+          "actions": {
+            "question": { "description": "A question about the configured harness.", "handler": "get_harness_profile", "artifacts": ["harness_profile"] },
+            "add_failure": { "description": "Add another failure to the setup.", "next_step": "failures", "handler": "state_only", "artifacts": [] }
+          }
+        }
+      }
+    },
+    "telemetry_exploration": {
+      "description": "Inspect uploaded ROS 2 MCAP recordings and render embodiment-neutral numeric, time-series, image, video, and synchronized views.",
+      "entry_step": "browse_recordings",
+      "steps": {
+        "browse_recordings": {
+          "opening": "Offer to list ROS 2 MCAP recordings that the edge has uploaded to the platform.",
+          "opening_artifacts": [],
+          "actions": {
+            "list_recordings": { "description": "List recordings uploaded by the edge.", "handler": "list_recordings", "artifacts": ["ros2_recordings"] },
+            "recording_selected": { "description": "A specific recording was selected.", "next_step": "inspect_recording", "handler": "select_recording", "artifacts": ["ros2_recording", "selection_not_found"] }
+          }
+        },
+        "inspect_recording": {
+          "opening": "Offer to list the selected recording's discovered cross-embodiment modalities.",
+          "opening_artifacts": [],
+          "actions": {
+            "list_modalities": { "description": "List discovered ROS 2 modalities and channels.", "handler": "list_modalities", "artifacts": ["ros2_modalities"] },
+            "modality_selected": { "description": "A modality was selected.", "next_step": "inspect_modality", "handler": "select_modality", "artifacts": ["ros2_modality", "selection_not_found"] },
+            "request_synchronized_view": { "description": "Render several modalities on one time range.", "handler": "request_synchronized_render", "artifacts": ["render_selection_required"] },
+            "review_another": { "description": "Return to the recording list.", "next_step": "browse_recordings", "handler": "state_only", "artifacts": [] }
+          }
+        },
+        "inspect_modality": {
+          "opening": "Offer the valid numeric, time-series, image, or video renderings for the selected modality.",
+          "opening_artifacts": [],
+          "actions": {
+            "render_numeric": { "description": "Render current or sampled numeric values.", "handler": "request_render", "render_kind": "numeric", "artifacts": ["render_job", "missing_render_input"] },
+            "render_time_series": { "description": "Render a downsampled numeric time series.", "handler": "request_render", "render_kind": "time_series", "artifacts": ["render_job", "missing_render_input"] },
+            "render_image": { "description": "Render an image frame at a timestamp.", "handler": "request_render", "render_kind": "image_frame", "artifacts": ["render_job", "missing_render_input"] },
+            "render_video": { "description": "Render a short video capture.", "handler": "request_render", "render_kind": "video_clip", "artifacts": ["render_job", "missing_render_input"] },
+            "ask_about_modality": { "description": "Ask about the selected channel or schema.", "handler": "get_modality", "artifacts": ["ros2_modality", "selection_not_found"] },
+            "select_another": { "description": "Return to the recording modalities.", "next_step": "inspect_recording", "handler": "state_only", "artifacts": [] }
+          }
+        }
+      }
+    },
+    "failure_proposal_review": {
+      "description": "Inspect evidence and decide whether a candidate is a real failure.",
+      "entry_step": "select_candidate",
+      "steps": {
+        "select_candidate": { "opening": "Offer to list pending failure proposals.", "opening_artifacts": [], "actions": {
+          "list_candidates": { "description": "List pending failure candidates.", "handler": "list_failure_candidates", "artifacts": ["failure_candidates"] },
+          "candidate_selected": { "description": "A candidate was selected.", "next_step": "inspect_candidate", "handler": "select_failure_candidate", "artifacts": ["failure_candidate", "selection_not_found"] }
+        }},
+        "inspect_candidate": { "opening": "Summarize the selected failure proposal and offer evidence review.", "opening_artifacts": [], "actions": {
+          "ask_about_evidence": { "description": "Ask a question about candidate evidence.", "handler": "get_failure_candidate", "artifacts": ["failure_candidate"] },
+          "accept_candidate": { "description": "Propose accepting the candidate.", "next_step": "collect_guidance", "handler": "stage_confirmation", "artifacts": ["confirmation_required"] },
+          "reject_candidate": { "description": "Propose rejecting the candidate.", "next_step": "confirm_decision", "handler": "stage_confirmation", "artifacts": ["confirmation_required"] },
+          "request_more_evidence": { "description": "Request more evidence.", "next_step": "confirm_decision", "handler": "unavailable", "artifacts": ["capability_unavailable"] },
+          "review_another": { "description": "Return to the candidate list.", "next_step": "select_candidate", "handler": "state_only", "artifacts": [] }
+        }},
+        "collect_guidance": { "opening": "Ask what recovery behavior the user wants for the selected failure.", "opening_artifacts": [], "actions": {
+          "guidance_provided": { "description": "Recovery guidance was supplied.", "next_step": "confirm_decision", "handler": "collect_guidance", "artifacts": [] },
+          "needs_guidance_help": { "description": "The user asks what guidance is required.", "handler": "state_only", "artifacts": [] }
+        }},
+        "confirm_decision": { "opening": "Briefly describe the pending decision and ask for explicit confirmation.", "opening_artifacts": [], "actions": {
+          "confirm": { "description": "Confirm the structured candidate decision.", "next_step": "complete", "handler": "confirm_pending_action", "artifacts": ["workflow_command", "missing_confirmation_input", "capability_unavailable"] },
+          "cancel": { "description": "Cancel the proposed decision.", "next_step": "inspect_candidate", "handler": "state_only", "artifacts": [] }
+        }},
+        "complete": { "opening": "Explain that the review is complete.", "opening_artifacts": [], "actions": {
+          "review_another": { "description": "Review another candidate.", "next_step": "select_candidate", "handler": "state_only", "artifacts": [] },
+          "question": { "description": "Ask about the completed review.", "handler": "state_only", "artifacts": [] }
+        }}
+      }
+    },
+    "recovery_policy_proposal_review": {
+      "description": "Inspect validation and exact hashes for a proposed recovery bundle.",
+      "entry_step": "select_bundle",
+      "steps": {
+        "select_bundle": { "opening": "Offer to list recovery policies ready for review.", "opening_artifacts": [], "actions": {
+          "list_bundles": { "description": "List recovery proposals ready for review.", "handler": "list_recovery_bundles", "artifacts": ["recovery_bundles"] },
+          "bundle_selected": { "description": "A recovery bundle was selected.", "next_step": "inspect_bundle", "handler": "select_recovery_bundle", "artifacts": ["recovery_bundle", "selection_not_found"] }
+        }},
+        "inspect_bundle": { "opening": "Offer validation and exact-hash review for the selected recovery policy.", "opening_artifacts": [], "actions": {
+          "ask_about_bundle": { "description": "Ask about behavior, evidence, validation, or differences.", "handler": "get_recovery_bundle", "artifacts": ["recovery_bundle"] },
+          "approve_bundle": { "description": "Propose approval of the exact bundle hash.", "next_step": "confirm_decision", "handler": "stage_confirmation", "artifacts": ["confirmation_required"] },
+          "reject_bundle": { "description": "Propose rejection of the exact bundle hash.", "next_step": "confirm_decision", "handler": "stage_confirmation", "artifacts": ["confirmation_required"] },
+          "revise_guidance": { "description": "Return to failure guidance for regeneration.", "next_step": "confirm_decision", "handler": "unavailable", "artifacts": ["capability_unavailable"] },
+          "review_another": { "description": "Return to the recovery list.", "next_step": "select_bundle", "handler": "state_only", "artifacts": [] }
+        }},
+        "confirm_decision": { "opening": "Briefly describe the pending decision and ask for explicit confirmation.", "opening_artifacts": [], "actions": {
+          "confirm": { "description": "Confirm the exact-hash recovery decision.", "next_step": "complete", "handler": "confirm_pending_action", "artifacts": ["workflow_command", "missing_confirmation_input", "capability_unavailable"] },
+          "cancel": { "description": "Cancel the proposed decision.", "next_step": "inspect_bundle", "handler": "state_only", "artifacts": [] }
+        }},
+        "complete": { "opening": "Explain that the recovery review is complete.", "opening_artifacts": [], "actions": {
+          "review_another": { "description": "Review another recovery.", "next_step": "select_bundle", "handler": "state_only", "artifacts": [] },
+          "question": { "description": "Ask about the completed recovery review.", "handler": "state_only", "artifacts": [] }
+        }}
+      }
+    },
+    "enforcement_history_review": {
+      "description": "Search and explain historical failure, recovery, and enforcement records.",
+      "entry_step": "browse",
+      "steps": {
+        "browse": { "opening": "Offer to list or filter recent enforcement records.", "opening_artifacts": [], "actions": {
+          "list_enforcements": { "description": "List recent enforcement records.", "handler": "list_enforcements", "artifacts": ["enforcement_history"] },
+          "filter_history": { "description": "Apply a natural-language history filter.", "handler": "list_enforcements", "artifacts": ["enforcement_history"] },
+          "enforcement_selected": { "description": "A specific enforcement was selected.", "next_step": "inspect", "handler": "select_enforcement", "artifacts": ["enforcement", "selection_not_found"] }
+        }},
+        "inspect": { "opening": "Offer to explain the selected enforcement timeline and outcome.", "opening_artifacts": [], "actions": {
+          "ask_about_enforcement": { "description": "Ask about the selected timeline or outcome.", "handler": "get_enforcement", "artifacts": ["enforcement"] },
+          "export_enforcement": { "description": "Request an authorized evidence export.", "handler": "unavailable", "artifacts": ["capability_unavailable"] },
+          "browse_another": { "description": "Return to enforcement history.", "next_step": "browse", "handler": "state_only", "artifacts": [] }
+        }}
+      }
+    },
+    "deployment": {
+      "description": "Deploy an approved recovery and wait for authoritative edge acknowledgement.",
+      "entry_step": "select_bundle",
+      "steps": {
+        "select_bundle": { "opening": "Offer to list approved recovery policies eligible for deployment.", "opening_artifacts": [], "actions": {
+          "list_approved_bundles": { "description": "List approved bundles eligible for deployment.", "handler": "list_approved_bundles", "artifacts": ["approved_recovery_bundles"] },
+          "bundle_selected": { "description": "An approved bundle was selected.", "next_step": "inspect_target", "handler": "select_recovery_bundle", "artifacts": ["recovery_bundle", "selection_not_found"] }
+        }},
+        "inspect_target": { "opening": "Offer to inspect the exact deployment target before confirmation.", "opening_artifacts": [], "actions": {
+          "ask_about_deployment": { "description": "Ask about target binding, revision, or readiness.", "handler": "get_deployment_status", "artifacts": ["deployment_status"] },
+          "deploy_bundle": { "description": "Propose deployment to the bound robot.", "next_step": "confirm_deployment", "handler": "stage_confirmation", "artifacts": ["confirmation_required"] },
+          "select_another": { "description": "Return to approved bundles.", "next_step": "select_bundle", "handler": "state_only", "artifacts": [] }
+        }},
+        "confirm_deployment": { "opening": "Briefly describe the exact deployment target and ask for explicit confirmation.", "opening_artifacts": [], "actions": {
+          "confirm": { "description": "Confirm the exact deployment target.", "next_step": "awaiting_receipt", "handler": "confirm_pending_action", "artifacts": ["workflow_command", "missing_confirmation_input", "capability_unavailable"] },
+          "cancel": { "description": "Cancel deployment.", "next_step": "inspect_target", "handler": "state_only", "artifacts": [] }
+        }},
+        "awaiting_receipt": { "opening": "Explain that deployment is awaiting an authoritative edge receipt.", "opening_artifacts": [], "actions": {
+          "check_status": { "description": "Check for the edge deployment receipt.", "handler": "get_deployment_status", "artifacts": ["deployment_status"] },
+          "cancel": { "description": "Stop waiting; this does not revoke an already queued command.", "next_step": "complete", "handler": "state_only", "artifacts": [] }
+        }},
+        "complete": { "opening": "Explain the deployment result.", "opening_artifacts": [], "actions": {
+          "question": { "description": "Ask about the deployment receipt.", "handler": "get_deployment_status", "artifacts": ["deployment_status"] },
+          "deploy_another": { "description": "Start another deployment.", "next_step": "select_bundle", "handler": "state_only", "artifacts": [] }
+        }}
+      }
+    }
+  },
+  "handlers": {
+    "state_only": { "kind": "state", "description": "Advance or answer without external I/O.", "requires": [] },
+    "collect_hardware": { "kind": "capture", "description": "Store the user's hardware description in session state.", "requires": ["input.text"] },
+    "collect_environment": { "kind": "capture", "description": "Store the user's operating environment in session state.", "requires": ["input.text"] },
+    "collect_task": { "kind": "capture", "description": "Store the user's task description in session state.", "requires": ["input.text"] },
+    "collect_failure": { "kind": "capture", "description": "Append a failure description to session state.", "requires": ["input.text"] },
+    "replace_failures": { "kind": "capture", "description": "Replace the complete failure list in session state.", "requires": ["input.text"] },
+    "collect_guidance": { "kind": "capture", "description": "Store recovery guidance in session state.", "requires": ["input.text"] },
+    "show_install_instructions": { "kind": "local", "description": "Return the supported edge installation command.", "requires": [] },
+    "show_connect_instructions": { "kind": "local", "description": "Return edge connection and pairing instructions.", "requires": [] },
+    "claim_device_pairing": { "kind": "mutation", "description": "Claim a device using an eight-character pairing code.", "requires": ["input.pairing_code", "authorization.user"] },
+    "check_setup_discovery": { "kind": "read", "description": "Read the latest ROS 2 setup scan and verify a captured sample.", "requires": ["domain.setup_discovery"] },
+    "complete_harness_configuration": { "kind": "mutation", "description": "Persist the collected profile configuration.", "requires": ["domain.profile_id", "collected.device_id", "collected.robot_type", "collected.environment", "collected.task", "domain.setup_discovery_ready"] },
+    "get_harness_profile": { "kind": "read", "description": "Return the configured harness profile.", "requires": ["domain.profile_id"] },
+    "list_recordings": { "kind": "read", "description": "List ready MCAP recordings for the profile.", "requires": ["domain.profile_id"] },
+    "select_recording": { "kind": "read", "description": "Load one selected recording.", "requires": ["input.recording_id", "domain.profile_id"] },
+    "list_modalities": { "kind": "read", "description": "List modalities discovered in the selected recording.", "requires": ["focus.recording_id", "domain.profile_id"] },
+    "select_modality": { "kind": "read", "description": "Load one selected recording modality.", "requires": ["input.modality_id", "domain.profile_id"] },
+    "get_modality": { "kind": "read", "description": "Reload the focused recording modality.", "requires": ["focus.modality_id", "domain.profile_id"] },
+    "request_render": { "kind": "mutation", "description": "Queue a derived numeric, series, image, or video render.", "requires": ["focus.recording_id", "focus.modality_id", "domain.profile_id"] },
+    "request_synchronized_render": { "kind": "input_gate", "description": "Request modality and time-range selection for a synchronized render.", "requires": ["focus.recording_id"] },
+    "list_failure_candidates": { "kind": "read", "description": "List failure candidates in the profile snapshot.", "requires": ["domain.snapshot.candidates"] },
+    "select_failure_candidate": { "kind": "read", "description": "Load a selected failure candidate.", "requires": ["input.candidate_id", "domain.snapshot.candidates"] },
+    "get_failure_candidate": { "kind": "read", "description": "Reload the focused failure candidate.", "requires": ["focus.candidate_id"] },
+    "list_recovery_bundles": { "kind": "read", "description": "List recovery bundles in the profile snapshot.", "requires": ["domain.snapshot.bundles"] },
+    "select_recovery_bundle": { "kind": "read", "description": "Load a selected recovery bundle.", "requires": ["input.bundle_id", "domain.snapshot.bundles"] },
+    "get_recovery_bundle": { "kind": "read", "description": "Reload the focused recovery bundle.", "requires": ["focus.bundle_id"] },
+    "list_approved_bundles": { "kind": "read", "description": "List recovery bundles eligible for deployment.", "requires": ["domain.snapshot.bundles"] },
+    "list_enforcements": { "kind": "read", "description": "List enforcement history for the bound robot.", "requires": ["domain.robot_id"] },
+    "select_enforcement": { "kind": "read", "description": "Load one enforcement record.", "requires": ["input.enforcement_id", "domain.profile_id"] },
+    "get_enforcement": { "kind": "read", "description": "Reload the focused enforcement record.", "requires": ["focus.enforcement_id", "domain.profile_id"] },
+    "get_deployment_status": { "kind": "read", "description": "Read deployment and edge acknowledgement status.", "requires": ["focus.bundle_id", "domain.profile_id"] },
+    "stage_confirmation": { "kind": "confirmation", "description": "Create an exact, reviewable pending action without executing it.", "requires": ["domain.revision", "domain.binding_hash"] },
+    "confirm_pending_action": { "kind": "mutation", "description": "Queue the explicitly confirmed pending action.", "requires": ["state.pending_action", "domain.robot_id", "domain.revision"] },
+    "unavailable": { "kind": "input_gate", "description": "Report that a declared product capability is not implemented.", "requires": [] }
+  },
+  "artifacts": {
+    "approved_recovery_bundles": { "label": "Approved recovery policies ready", "renderer": "collection", "surface": "chat" },
+    "capability_unavailable": { "label": "Capability unavailable", "renderer": "notice", "surface": "chat" },
+    "configuration_field": { "label": "Profile detail captured", "renderer": "configuration_field", "surface": "chat" },
+    "confirmation_required": { "label": "Confirmation required", "renderer": "confirmation", "surface": "chat" },
+    "connect_instructions": { "label": "Connection instructions ready", "renderer": "instructions", "surface": "chat" },
+    "deployment_status": { "label": "Deployment status checked", "renderer": "detail", "surface": "chat" },
+    "enforcement": { "label": "Enforcement selected", "renderer": "detail", "surface": "chat" },
+    "enforcement_history": { "label": "Enforcement history ready", "renderer": "collection", "surface": "chat" },
+    "failure_candidate": { "label": "Failure proposal selected", "renderer": "detail", "surface": "chat" },
+    "failure_candidates": { "label": "Failure proposals ready", "renderer": "collection", "surface": "chat" },
+    "flow_dependency": { "label": "Checking workflow prerequisites", "renderer": "notice", "surface": "chat" },
+    "harness_configuration": { "label": "Harness configuration saved", "renderer": "profile", "surface": "context" },
+    "harness_profile": { "label": "Harness profile ready", "renderer": "profile", "surface": "context" },
+    "install_instructions": { "label": "Installation instructions ready", "renderer": "instructions", "surface": "chat" },
+    "missing_configuration_input": { "label": "Configuration details required", "renderer": "notice", "surface": "chat" },
+    "missing_confirmation_input": { "label": "Confirmation details required", "renderer": "notice", "surface": "chat" },
+    "missing_render_input": { "label": "Render selection required", "renderer": "notice", "surface": "chat" },
+    "paired_device": { "label": "Device paired", "renderer": "device", "surface": "context" },
+    "profile_events_reconciled": { "label": "Profile updates checked", "renderer": "activity", "surface": "chat" },
+    "recovery_bundle": { "label": "Recovery policy selected", "renderer": "detail", "surface": "chat" },
+    "recovery_bundles": { "label": "Recovery proposals ready", "renderer": "collection", "surface": "chat" },
+    "render_job": { "label": "Preparing render", "renderer": "render_job", "surface": "context" },
+    "render_selection_required": { "label": "Synchronized view selection required", "renderer": "notice", "surface": "chat" },
+    "ros2_modalities": { "label": "Streams discovered", "renderer": "modalities", "surface": "context" },
+    "ros2_modality": { "label": "Stream selected", "renderer": "modality", "surface": "context" },
+    "ros2_recording": { "label": "Recording selected", "renderer": "recording", "surface": "context" },
+    "ros2_recordings": { "label": "Uploaded recordings found", "renderer": "recordings", "surface": "context" },
+    "ros2_setup_discovery": { "label": "Live ROS 2 data checked", "renderer": "setup_discovery", "surface": "context" },
+    "selection_not_found": { "label": "Selection not found", "renderer": "notice", "surface": "chat" },
+    "stale_action_invalidated": { "label": "Stale action cancelled", "renderer": "notice", "surface": "chat" },
+    "workflow_command": { "label": "Request queued for the edge", "renderer": "command", "surface": "chat" }
+  }
+}

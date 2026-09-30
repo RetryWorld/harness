@@ -1,4 +1,5 @@
 #include "store.hpp"
+#include "critic_features.hpp"
 #include <algorithm>
 #include <cmath>
 #include <fcntl.h>
@@ -78,6 +79,224 @@ void range(const Json &v, double lower, double upper, const std::string &name) {
               v.get<double>() >= lower && v.get<double>() <= upper,
           "invalid " + name);
 }
+void refresh_critic_readiness(Json &state) {
+  const bool ready = state.value("critic_context", Json(nullptr)).is_object() &&
+                     state.value("propositions", Json::object()).is_object() &&
+                     !state.value("propositions", Json::object()).empty();
+  state["critic_profile_ready"] = ready;
+  state["critic_runtime_status"] =
+      ready ? "ready_for_compilation" : "awaiting_profile_setup";
+}
+void compile_critic(Json &state, const fs::path &root, Ns profile_revision) {
+  refresh_critic_readiness(state);
+  if (!state["critic_profile_ready"].get<bool>()) {
+    state["critic_compilation"] = nullptr;
+    state["critic_deployment"] = nullptr;
+    if (state["placeholders"].is_array() &&
+        std::find(state["placeholders"].begin(), state["placeholders"].end(),
+                  Json("critic_inference")) == state["placeholders"].end())
+      state["placeholders"].push_back("critic_inference");
+    if (state.value("installed_deployment", Json(nullptr)).is_null())
+      state["enforcement_status"] = "unavailable";
+    return;
+  }
+  Json proposition_source = Json::object();
+  for (auto it = state["propositions"].begin();
+       it != state["propositions"].end(); ++it) {
+    const auto &proposition = it.value();
+    proposition_source[it.key()] = {
+        {"id", proposition["id"]},
+        {"description", proposition["description"]},
+        {"polarity", proposition["polarity"]},
+        {"scope", proposition["scope"]},
+        {"candidate_threshold", proposition.value("candidate_threshold", 0.95)},
+        {"snapshots", proposition["snapshots"]},
+        {"recovery", proposition["recovery"]}};
+  }
+  Json source = {{"schema_version", 1},
+                 {"compiler", "edge_profile_compiler_v1"},
+                 {"encoder", critic_feature_encoder},
+                 {"profile_id", state["profile_id"]},
+                 {"binding_hash", state["binding_hash"]},
+                 {"context", state["critic_context"]},
+                 {"propositions", proposition_source}};
+  const auto input_hash = digest(source);
+  const auto previous = state.value("critic_compilation", Json(nullptr));
+  if (previous.is_object() && previous.value("input_hash", "") == input_hash &&
+      !(previous.value("compile_state", "") == "awaiting_ros_runtime" &&
+        snapshot_compiler_available()))
+    return;
+  Json embedding_cache = Json::object();
+  if (previous.is_object() &&
+      previous.value("encoder", "") == critic_feature_encoder &&
+      previous.value("heads", Json::array()).is_array())
+    for (const auto &head : previous["heads"])
+      for (const auto &record : head.value("snapshots", Json::array()))
+        if (record.value("embedding", Json::object()).value("status", "") ==
+            "ready")
+          embedding_cache[digest(Json::array(
+              {record["evidence_sha256"], record["window_hash"],
+               head["required_roles_mask"]}))] = record["embedding"];
+
+  Json heads = Json::array(), runtime_heads = Json::array(), classes = Json::array();
+  bool missing_examples = false, compile_error = false, runtime_unavailable = false;
+  for (auto it = state["propositions"].begin();
+       it != state["propositions"].end(); ++it) {
+    const auto &proposition = it.value();
+    std::uint32_t required_roles = 0;
+    for (const auto &role : proposition["scope"]["required_roles"]) {
+      const auto bit = critic_role_bit(role.get<std::string>());
+      compile_error = compile_error || bit == 0;
+      required_roles |= bit;
+    }
+    Json snapshots = Json::array(), centers = Json::array(), center_counts = Json::array();
+    std::vector<std::array<float, critic_embedding_dimensions>> sums;
+    std::vector<std::size_t> counts;
+    for (const auto &snapshot : proposition["snapshots"]) {
+      Json record = {{"failure_id", snapshot["failure_id"]},
+                     {"evidence_sha256", snapshot["evidence"]["sha256"]},
+                     {"window_hash", digest(snapshot["window"])}};
+      try {
+        const auto cache_key = digest(Json::array(
+            {record["evidence_sha256"], record["window_hash"], required_roles}));
+        const auto embedded = embedding_cache.contains(cache_key)
+                                  ? embedding_cache[cache_key]
+                                  : compile_snapshot_embedding(
+                                        root / "artifacts" /
+                                            snapshot["evidence"]["sha256"]
+                                                .get<std::string>(),
+                                        state["binding"], snapshot["window"],
+                                        required_roles);
+        record["embedding"] = embedded;
+        const auto status = embedded.value("status", "error");
+        if (status == "runtime_unavailable") runtime_unavailable = true;
+        if (status != "ready") compile_error = compile_error || status != "runtime_unavailable";
+        if (status == "ready") {
+          require(embedded["vector"].is_array() &&
+                      embedded["vector"].size() == critic_embedding_dimensions,
+                  "snapshot encoder returned an invalid vector");
+          std::array<float, critic_embedding_dimensions> vector{};
+          for (std::size_t d = 0; d < vector.size(); ++d)
+            vector[d] = embedded["vector"][d].get<float>();
+          std::size_t selected = sums.size();
+          float best = -2;
+          for (std::size_t k = 0; k < sums.size(); ++k) {
+            double norm = 0, dot = 0;
+            for (std::size_t d = 0; d < vector.size(); ++d) {
+              dot += static_cast<double>(sums[k][d]) *
+                     static_cast<double>(vector[d]);
+              norm += static_cast<double>(sums[k][d]) *
+                      static_cast<double>(sums[k][d]);
+            }
+            const auto similarity =
+                static_cast<float>(dot / std::sqrt(std::max(norm, 1e-12)));
+            if (similarity > best) { best = similarity; selected = k; }
+          }
+          if (sums.empty() || (sums.size() < 4 && best < 0.8F)) {
+            sums.push_back(vector);
+            counts.push_back(1);
+          } else {
+            for (std::size_t d = 0; d < vector.size(); ++d)
+              sums[selected][d] += vector[d];
+            ++counts[selected];
+          }
+        }
+      } catch (const std::exception &error) {
+        record["embedding"] = {{"status", "error"}, {"error", error.what()}};
+        compile_error = true;
+      }
+      snapshots.push_back(std::move(record));
+    }
+    for (std::size_t k = 0; k < sums.size(); ++k) {
+      double norm = 0;
+      for (const auto value : sums[k])
+        norm += static_cast<double>(value) * static_cast<double>(value);
+      norm = std::sqrt(norm);
+      Json center = Json::array();
+      for (const auto value : sums[k])
+        center.push_back(static_cast<double>(value) / norm);
+      centers.push_back(std::move(center));
+      center_counts.push_back(counts[k]);
+    }
+    missing_examples = missing_examples || snapshots.empty();
+    const std::string head_status =
+        snapshots.empty() ? "unknown_no_examples" :
+        centers.empty() ? "embedding_failed" : "ready";
+    state["propositions"][it.key()]["detector_status"] = head_status;
+    heads.push_back({{"proposition_id", it.key()},
+                     {"description", proposition["description"]},
+                     {"scope", proposition["scope"]},
+                     {"required_roles_mask", required_roles},
+                     {"snapshots", snapshots},
+                     {"centers", centers},
+                     {"center_counts", center_counts},
+                     {"candidate_threshold", proposition.value("candidate_threshold", 0.95)},
+                     {"score_kind", "uncalibrated_cosine_similarity"},
+                     {"recovery", proposition["recovery"]},
+                     {"status", head_status}});
+    runtime_heads.push_back({
+        {"proposition_id", it.key()}, {"scope", proposition["scope"]},
+        {"required_roles_mask", required_roles}, {"centers", centers},
+        {"center_counts", center_counts},
+        {"candidate_threshold", proposition.value("candidate_threshold", 0.95)},
+        {"score_kind", "uncalibrated_cosine_similarity"}});
+    classes.push_back(it.key());
+  }
+  const auto generation = previous.is_object()
+                              ? previous.value("generation", 0) + 1
+                              : 1;
+  const auto context_hash = digest(state["critic_context"]);
+  const std::string compile_state =
+      missing_examples ? "awaiting_examples" :
+      compile_error ? "compile_failed" :
+      runtime_unavailable ? "awaiting_ros_runtime" : "ready_shadow";
+  Json compiled = {{"schema_version", 1},
+                   {"compiler", "edge_profile_compiler_v1"},
+                   {"encoder", critic_feature_encoder},
+                   {"generation", generation},
+                   {"profile_revision", profile_revision},
+                   {"input_hash", input_hash},
+                   {"context_hash", context_hash},
+                   {"heads", heads},
+                   {"compile_state", compile_state}};
+  compiled["model_hash"] = digest(compiled);
+  state["critic_compilation"] = compiled;
+  state["critic_deployment"] = {
+      {"schema_version", 2},
+      {"id", "critic-" + compiled["model_hash"].get<std::string>().substr(0, 32)},
+      {"profile_id", state["profile_id"]},
+      {"profile_revision", profile_revision},
+      {"binding_hash", state["binding_hash"]},
+      {"runtime", "proposition_bank_v1"},
+      {"compiler", "edge_profile_compiler_v1"},
+      {"model_hash", compiled["model_hash"]},
+      {"context_hash", context_hash},
+      {"classes", classes},
+      {"heads", runtime_heads},
+      {"encoder", critic_feature_encoder},
+      {"score_kind", "uncalibrated_cosine_similarity"},
+      {"mode", "shadow"},
+      {"deployment_validated", false},
+      {"executable", compile_state == "ready_shadow"},
+      {"compile_state", compiled["compile_state"]}};
+  state["critic_runtime_status"] = compiled["compile_state"];
+  if (compile_state == "ready_shadow" && state["placeholders"].is_array()) {
+    auto &placeholders = state["placeholders"];
+    placeholders.erase(
+        std::remove(placeholders.begin(), placeholders.end(),
+                    Json("critic_inference")),
+        placeholders.end());
+  } else if (state["placeholders"].is_array() &&
+             std::find(state["placeholders"].begin(),
+                       state["placeholders"].end(),
+                       Json("critic_inference")) ==
+                 state["placeholders"].end()) {
+    state["placeholders"].push_back("critic_inference");
+  }
+  if (state.value("installed_deployment", Json(nullptr)).is_null())
+    state["enforcement_status"] =
+        compile_state == "ready_shadow" ? "shadow" : "unavailable";
+}
 } // namespace
 Store::Store(fs::path directory) : root(fs::absolute(std::move(directory))) {
   require(fs::is_regular_file(root / "workflow.sqlite3"),
@@ -86,13 +305,17 @@ Store::Store(fs::path directory) : root(fs::absolute(std::move(directory))) {
   db.exec("CREATE TABLE IF NOT EXISTS sync_receipts(id TEXT PRIMARY KEY, "
           "body TEXT NOT NULL)");
   auto state = observation::snapshot(db);
+  const auto before_compile = state;
+  if (state.value("critic_runtime_status", "") == "awaiting_ros_runtime" &&
+      snapshot_compiler_available())
+    compile_critic(state, root, state.value<Ns>("revision", 0));
   if (state.contains("placeholders") && state["placeholders"].is_array()) {
     auto &placeholders = state["placeholders"];
     const auto original_size = placeholders.size();
     placeholders.erase(
         std::remove(placeholders.begin(), placeholders.end(), "database_sync"),
         placeholders.end());
-    if (placeholders.size() != original_size) {
+    if (placeholders.size() != original_size || state != before_compile) {
       Statement update(db, "UPDATE profile SET body=? WHERE id=1");
       update.bind(1, encoded(state));
       update.next();
@@ -106,21 +329,28 @@ Store Store::create(const fs::path &directory, const fs::path &config) {
   const int fd = ::open(path.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
   require(fd >= 0, "store already exists or cannot be created");
   ::close(fd);
+  const auto profile_id = "profile-" + unique_id();
+  const auto binding_hash = digest(binding);
   Json state = {{"schema_version", 1},
-                {"profile_id", "profile-" + unique_id()},
+                {"profile_id", profile_id},
                 {"revision", 0},
                 {"binding", binding},
-                {"binding_hash", digest(binding)},
+                {"binding_hash", binding_hash},
                 {"candidates", Json::object()},
                 {"failures", Json::object()},
+                {"propositions", Json::object()},
                 {"jobs", Json::object()},
                 {"bundles", Json::object()},
                 {"deployments", Json::object()},
                 {"critic_deployment", nullptr},
+                {"critic_compilation", nullptr},
+                {"critic_context", nullptr},
+                {"critic_profile_ready", false},
+                {"critic_runtime_status", "awaiting_profile_setup"},
                 {"installed_deployment", nullptr},
                 {"enforcement_status", "unavailable"},
-                {"placeholders",
-                 {"critic_inference", "recovery_controller"}}};
+                {"placeholders", {"critic_inference", "recovery_controller"}}};
+  compile_critic(state, directory, 0);
   Database db(path);
   db.exec(
       "PRAGMA journal_mode=WAL; CREATE TABLE profile(id INTEGER PRIMARY KEY "
@@ -141,7 +371,8 @@ Store Store::create(const fs::path &directory, const fs::path &config) {
                 {"operation", "initialize"},
                 {"actor", "local_cli"},
                 {"wall_ns", wall_ns()},
-                {"result", {{"binding_hash", state["binding_hash"]}}}};
+                {"result", {{"binding_hash", state["binding_hash"]},
+                            {"critic_runtime", "awaiting_profile_setup"}}}};
   Statement out(db, "INSERT INTO outbox(body) VALUES(?)");
   out.bind(1, encoded({{"event", event}, {"profile", state}}));
   out.next();
@@ -356,7 +587,12 @@ Json Store::apply_internal(const Json &request, bool queue_sync_receipt) const {
     const auto op = request.at("operation").get<std::string>();
     auto result =
         transition(state, op, request.value("payload", Json::object()), actor);
-    state["revision"] = state.at("revision").get<Ns>() + 1;
+    const auto next_revision = state.at("revision").get<Ns>() + 1;
+    // Compilation is part of the same transaction as the profile mutation.
+    // A crash can expose the old profile+model or the new profile+model, never
+    // a new proposition set paired with an old critic generation.
+    compile_critic(state, root, next_revision);
+    state["revision"] = next_revision;
     Json event = {{"schema_version", 1},
                   {"event_id", unique_id()},
                   {"profile_id", state["profile_id"]},
@@ -404,45 +640,66 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
             std::string("unknown ") + key);
     return s.at(collection).at(p.at(key).get<std::string>());
   };
-  if (op == "install_critic") {
-    const auto &deployment = p.at("deployment");
-    require(deployment.is_object() && deployment.value("schema_version", 0) == 1,
-            "critic deployment requires schema_version 1");
-    for (const auto *key : {"id", "profile_id", "binding_hash", "runtime", "mode"})
-      required_text(deployment.at(key), key);
-    require(deployment.at("profile_id") == s.at("profile_id"),
-            "critic deployment belongs to a different profile");
-    require(deployment.at("binding_hash") == s.at("binding_hash"),
-            "critic deployment binding mismatch");
-    require(deployment.at("mode") == "shadow",
-            "cloud critic deployments must begin in shadow mode");
-    require(deployment.value("trained", true) == false ||
-                deployment.value("deployment_validated", false),
-            "trained critic deployment is missing validation");
-    require(deployment.contains("classes") && deployment["classes"].is_array() &&
-                !deployment["classes"].empty() && deployment["classes"].size() <= 64,
-            "critic deployment requires 1..64 classes");
-    for (const auto &name : deployment["classes"])
-      required_text(name, "critic class");
-    if (deployment.at("runtime") == "bootstrap_mlp_v1") {
-      const auto seed = required_text(deployment.at("seed"), "critic seed");
-      require(seed.size() == 16 &&
-                  seed.find_first_not_of("0123456789abcdef") == std::string::npos,
-              "bootstrap critic seed must be 16 lowercase hexadecimal characters");
-      range(deployment.at("candidate_threshold"), 0, 1, "candidate_threshold");
-      require(deployment.value("minimum_samples", 0) >= 1 &&
-                  deployment.value("minimum_samples", 0) <= 10000,
-              "bootstrap critic minimum_samples must be within 1..10000");
+  if (op == "set_critic_context") {
+    const auto &context = p.at("context");
+    require(context.value("schema_version", 0) == 1,
+            "critic_context requires schema_version 1");
+    required_text(context.at("task"), "task");
+    required_text(context.at("embodiment").at("class_id"), "embodiment class");
+    require(context.at("embodiment").at("joint_names") == s["binding"]["joint_order"],
+            "critic context joint names differ from binding");
+    require(s["installed_deployment"].is_null(),
+            "deactivate installed recovery before changing critic context");
+    s["critic_context"] = context;
+    if (s.contains("propositions"))
+      for (auto &proposition : s["propositions"])
+        proposition["detector_status"] = "needs_compile";
+    refresh_critic_readiness(s);
+    return context;
+  }
+  if (op == "add_proposition") {
+    const auto id = required_text(p.at("proposition_id"), "proposition_id");
+    const auto description = required_text(p.at("description"), "description");
+    const auto &scope = p.at("scope");
+    range(scope.at("required_hz"), 0.5, 2000, "required_hz");
+    range(scope.at("max_input_age_ms"), 0.1, 10000, "max_input_age_ms");
+    require(scope.at("required_roles").is_array() &&
+                !scope.at("required_roles").empty(), "required_roles must be nonempty");
+    for (const auto &role : scope.at("required_roles")) {
+      const auto name = required_text(role, "required role");
+      require(critic_role_bit(name) != 0,
+              "unknown critic modality role: " + name);
+      require(std::any_of(s["binding"]["topics"].begin(), s["binding"]["topics"].end(),
+                         [&](const Json &topic) { return topic.value("role", "") == name; }),
+              "proposition requires an unbound modality: " + name);
     }
-    if (!s.contains("critic_deployment") || s["critic_deployment"] != deployment)
-      s["critic_deployment"] = deployment;
-    if (s.contains("placeholders") && s["placeholders"].is_array()) {
-      auto &placeholders = s["placeholders"];
-      placeholders.erase(std::remove(placeholders.begin(), placeholders.end(),
-                                     "critic_inference"), placeholders.end());
-    }
-    if (s["installed_deployment"].is_null()) s["enforcement_status"] = "shadow";
-    return s["critic_deployment"];
+    const auto candidate_threshold = p.value("candidate_threshold", 0.95);
+    range(candidate_threshold, 0.5, 1.0, "candidate_threshold");
+    if (!s.contains("propositions")) s["propositions"] = Json::object();
+    require(s["propositions"].size() < 4096,
+            "proposition bank capacity exceeded");
+    require(!s["propositions"].contains(id), "proposition already exists");
+    s["propositions"][id] = {
+        {"id", id}, {"description", description}, {"polarity", "must_avoid"},
+        {"scope", scope}, {"snapshots", Json::array()}, {"recovery", nullptr},
+        {"candidate_threshold", candidate_threshold},
+        {"detector_status", "unconfigured"}, {"created_by", actor}};
+    refresh_critic_readiness(s);
+    return s["propositions"][id];
+  }
+  if (op == "link_proposition_recovery") {
+    auto &proposition = item("propositions", "proposition_id");
+    const auto &bundle = item("bundles", "bundle_id");
+    require(bundle["status"] == "approved" &&
+                bundle["content_hash"] == p.at("content_hash"),
+            "recovery link requires an exact approved bundle");
+    const auto &failure = s["failures"].at(bundle["failure_id"].get<std::string>());
+    require(failure.value("proposition_id", "") == proposition["id"].get<std::string>() &&
+                failure["guidance_revision"] == bundle["guidance_revision"],
+            "recovery bundle belongs to a different proposition or stale guidance");
+    proposition["recovery"] = {{"bundle_id", bundle["id"]},
+                                {"content_hash", bundle["content_hash"]}};
+    return proposition;
   }
   if (op == "candidate") {
     const auto &w = p.at("window");
@@ -480,7 +737,7 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
     verify_artifact(p.at("artifact"), "evidence_mcap");
     c["evidence"] = p["artifact"];
     // Routing happens only after immutable MCAP evidence is attached. An
-    // unvalidated/bootstrap critic cannot reach this branch, even when a
+    // unvalidated critic cannot reach this branch, even when a
     // random label happens to equal an approved evidence class.
     const auto &detection = c.at("detection");
     const auto deployed_critic = s.value("critic_deployment", Json(nullptr));
@@ -530,6 +787,18 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
         {"guidance", required_text(p.at("guidance"), "guidance")},
         {"guidance_revision", 1},
         {"accepted_by", actor}};
+    if (p.contains("proposition_id")) {
+      auto &proposition = item("propositions", "proposition_id");
+      failure["proposition_id"] = proposition["id"];
+      // Keep exact immutable evidence and time bounds. A moment belongs to a
+      // proposition only through this explicit acceptance, never label guessing.
+      proposition["snapshots"].push_back({
+          {"failure_id", id}, {"candidate_id", c["id"]},
+          {"session_id", c["session_id"]}, {"window", c["window"]},
+          {"evidence", c["evidence"]}, {"binding_hash", s["binding_hash"]},
+          {"accepted_by", actor}});
+      proposition["detector_status"] = "needs_compile";
+    }
     s["failures"][id] = failure;
     c.update({{"status", "accepted_failure"},
               {"failure_id", id},
@@ -672,6 +941,7 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
     s["installed_deployment"] = nullptr;
     s["enforcement_status"] =
         s.value("critic_deployment", Json(nullptr)).is_object() ? "shadow" : "unavailable";
+    refresh_critic_readiness(s);
     return r;
   }
   throw std::runtime_error("unknown workflow operation: " + op);

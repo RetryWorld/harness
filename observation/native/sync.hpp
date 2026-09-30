@@ -16,7 +16,6 @@ public:
   virtual void upload(const std::string &robot_id, const Json &snapshot,
                       const Json &receipts) = 0;
   virtual Json pending(const std::string &profile_id) = 0;
-  virtual Json critic_deployment(const std::string &) { return nullptr; }
   virtual void upload_enforcements(const std::string &, const Json &) = 0;
 };
 

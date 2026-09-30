@@ -1,4 +1,5 @@
 #include "common.hpp"
+#include "critic_features.hpp"
 #include "evidence.hpp"
 #include "recording.hpp"
 #include "runtime.hpp"
@@ -6,6 +7,7 @@
 #include "service.hpp"
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cerrno>
 #include <cmath>
 #include <cstdlib>
@@ -18,6 +20,7 @@
 #include <iostream>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialization.hpp>
+#include <rosbag2_cpp/reader.hpp>
 #include <rcutils/error_handling.h>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/compressed_image.hpp>
@@ -99,97 +102,165 @@ template <class T> T decode_bytes(const std::vector<std::uint8_t> &bytes) {
   raw.buffer_length = bytes.size();
   return decode<T>(serialized);
 }
-
-// The install-time bootstrap critic is a deliberately tiny, fixed-shape MLP
-// over the latest joint/action summary. Its network scoring allocates nothing. Its weights are
-// deterministic per profile but untrained, so it is shadow-only and can only
-// create review candidates.  It gives every installation a real inference
-// path while the TensorRT vision critic is trained and validated.
-class BootstrapCritic final : public CriticAdapter {
-  static constexpr std::size_t features = 12, hidden = 16;
-  Json deployment_;
-  std::array<double, features * hidden> first_{};
-  std::array<double, hidden> first_bias_{}, second_{}, feature_{};
-  double second_bias_ = 0.0;
-  std::size_t samples_ = 0;
-  Ns epoch_ = -1;
-
-  static double squash(double value) {
-    return std::copysign(std::log1p(std::abs(value)), value) / 8.0;
+std::vector<double> ordered(const std::vector<std::string> &names,
+                            const std::vector<double> &values,
+                            const std::vector<std::string> &order) {
+  if (values.empty()) return {};
+  require(names.size() == values.size(), "JointState field size mismatch");
+  std::map<std::string, std::size_t> indexes;
+  for (std::size_t i = 0; i < names.size(); ++i)
+    require(indexes.emplace(names[i], i).second, "duplicate JointState name");
+  std::vector<double> result;
+  result.reserve(order.size());
+  for (const auto &name : order) {
+    require(indexes.contains(name), "JointState is missing bound joint: " + name);
+    result.push_back(values[indexes.at(name)]);
   }
+  return result;
+}
+void add_joint(CriticFeatureAccumulator &features,
+               const sensor_msgs::msg::JointState &message,
+               const std::vector<std::string> &joints) {
+  features.joint(ordered(message.name, message.position, joints),
+                 ordered(message.name, message.velocity, joints),
+                 ordered(message.name, message.effort, joints));
+}
+void add_image(CriticFeatureAccumulator &features,
+               const sensor_msgs::msg::Image &message) {
+  const auto channels = message.encoding == "mono8" ? 1U :
+      (message.encoding == "rgb8" || message.encoding == "bgr8") ? 3U :
+      (message.encoding == "rgba8" || message.encoding == "bgra8") ? 4U : 0U;
+  require(channels != 0, "unsupported critic image encoding: " + message.encoding);
+  features.image(message.data, message.width, message.height, message.step,
+                 channels, message.encoding == "bgr8" ||
+                               message.encoding == "bgra8");
+}
+
+class ProfileCritic final : public CriticAdapter {
+  Json deployment_;
+  std::vector<Ns> last_evaluation_;
+  std::vector<std::uint64_t> missed_deadlines_;
+  Ns epoch_ = -1;
+  Json telemetry_ = {{"score_kind", "uncalibrated_cosine_similarity"},
+                     {"probability_calibrated", false},
+                     {"scores", Json::object()}};
 
 public:
-  explicit BootstrapCritic(Json deployment) : deployment_(std::move(deployment)) {
-    require(deployment_.value("runtime", "") == "bootstrap_mlp_v1" &&
-                deployment_.value("mode", "") == "shadow" &&
-                deployment_.value("trained", true) == false,
-            "invalid bootstrap critic contract");
-    std::uint64_t state = std::stoull(deployment_.at("seed").get<std::string>(), nullptr, 16);
-    auto weight = [&]() {
-      state ^= state << 13; state ^= state >> 7; state ^= state << 17;
-      return (static_cast<double>(state & 0xffffU) / 32767.5 - 1.0) * 0.35;
-    };
-    for (auto &value : first_) value = weight();
-    for (auto &value : first_bias_) value = weight() * 0.1;
-    for (auto &value : second_) value = weight();
+  explicit ProfileCritic(Json deployment) : deployment_(std::move(deployment)) {
+    require(deployment_.value("runtime", "") == "proposition_bank_v1" &&
+                deployment_.value("encoder", "") == critic_feature_encoder &&
+                deployment_.value("executable", false) &&
+                deployment_.contains("heads") && deployment_["heads"].is_array(),
+            "invalid executable proposition deployment");
+    last_evaluation_.assign(deployment_["heads"].size(), -1);
+    missed_deadlines_.assign(deployment_["heads"].size(), 0);
   }
   bool ready() const override { return true; }
   bool load(const fs::path &, const Json &, const Json &) override { return false; }
+  Json telemetry() const override { return telemetry_; }
   std::optional<Detection> evaluate(const Observations &observations) override {
-    if (epoch_ != observations.epoch) { epoch_ = observations.epoch; samples_ = 0; }
-    const ObservationMessage *joint_packet = nullptr, *command_packet = nullptr;
-    for (auto it = observations.messages.rbegin(); it != observations.messages.rend(); ++it) {
-      if (!joint_packet && it->type == "sensor_msgs/msg/JointState") joint_packet = &*it;
-      if (!command_packet && it->type == "std_msgs/msg/Float64MultiArray") command_packet = &*it;
-      if (joint_packet && command_packet) break;
+    if (observations.epoch != epoch_) {
+      epoch_ = observations.epoch;
+      std::fill(last_evaluation_.begin(), last_evaluation_.end(), -1);
     }
-    if (!joint_packet) return std::nullopt;
-    const auto joint = decode_bytes<sensor_msgs::msg::JointState>(joint_packet->cdr);
-    if (joint.position.empty() || !finite(joint.position)) return std::nullopt;
-    feature_.fill(0);
-    auto summarize = [&](const std::vector<double> &values, std::size_t offset) {
-      if (values.empty() || !finite(values)) return;
-      double sum = 0, maximum = 0, squared = 0;
-      for (const auto value : values) {
-        sum += std::abs(value); maximum = std::max(maximum, std::abs(value));
-        squared += value * value;
-      }
-      feature_[offset] = squash(sum / static_cast<double>(values.size()));
-      feature_[offset + 1] = squash(maximum);
-      feature_[offset + 2] = squash(std::sqrt(squared / static_cast<double>(values.size())));
-    };
-    summarize(joint.position, 0); summarize(joint.velocity, 3); summarize(joint.effort, 6);
-    if (command_packet) {
-      const auto command = decode_bytes<std_msgs::msg::Float64MultiArray>(command_packet->cdr);
-      if (finite(command.data) && command.data.size() == joint.position.size()) {
-        double sum = 0, maximum = 0, squared = 0;
-        for (std::size_t index = 0; index < command.data.size(); ++index) {
-          const double error = command.data[index] - joint.position[index];
-          sum += std::abs(error); maximum = std::max(maximum, std::abs(error));
-          squared += error * error;
-        }
-        feature_[9] = squash(sum / static_cast<double>(command.data.size()));
-        feature_[10] = squash(maximum);
-        feature_[11] = squash(std::sqrt(squared / static_cast<double>(command.data.size())));
+    std::vector<bool> due(deployment_["heads"].size(), false);
+    std::uint32_t due_roles = 0;
+    const auto evaluation_started = monotonic_ns();
+    for (std::size_t i = 0; i < deployment_["heads"].size(); ++i) {
+      const auto &head = deployment_["heads"][i];
+      const auto period = static_cast<Ns>(std::llround(
+          1e9 / head["scope"]["required_hz"].get<double>()));
+      if (last_evaluation_[i] < 0 ||
+          observations.receipt_ros_ns - last_evaluation_[i] >= period) {
+        if (last_evaluation_[i] >= 0 &&
+            observations.receipt_ros_ns - last_evaluation_[i] >
+                period + period / 2)
+          ++missed_deadlines_[i];
+        due[i] = true;
+        due_roles |= head["required_roles_mask"].get<std::uint32_t>();
+        last_evaluation_[i] = observations.receipt_ros_ns;
       }
     }
-    ++samples_;
-    if (samples_ < deployment_.value("minimum_samples", std::size_t{8}))
-      return std::nullopt;
-    std::array<double, hidden> layer{};
-    for (std::size_t h = 0; h < hidden; ++h) {
-      layer[h] = first_bias_[h];
-      for (std::size_t f = 0; f < features; ++f)
-        layer[h] += first_[h * features + f] * feature_[f];
-      layer[h] = std::tanh(layer[h]);
+    if (due_roles == 0) return std::nullopt;
+    CriticFeatureAccumulator features;
+    std::map<std::string, Json> topics;
+    for (const auto &topic : observations.config["topics"])
+      topics[topic["name"].get<std::string>()] = topic;
+    std::map<std::string, const ObservationMessage *> latest_images;
+    std::array<Ns, 5> role_times{};
+    role_times.fill(-1);
+    const auto joints =
+        observations.config["joint_order"].get<std::vector<std::string>>();
+    const auto start = std::max<Ns>(0, observations.receipt_ros_ns - 1000000000LL);
+    for (const auto &packet : observations.messages) {
+      if (packet.receipt_ros_ns < start || !topics.contains(packet.topic)) continue;
+      const auto role = topics.at(packet.topic).value("role", "");
+      const auto bit = critic_role_bit(role);
+      if ((due_roles & bit) == 0) continue;
+      if (bit != 0)
+        role_times[static_cast<std::size_t>(std::countr_zero(bit))] =
+            packet.receipt_ros_ns;
+      if (role == "joint_state")
+        add_joint(features,
+                  decode_bytes<sensor_msgs::msg::JointState>(*packet.cdr), joints);
+      else if (role == "action")
+        features.action(
+            decode_bytes<std_msgs::msg::Float64MultiArray>(*packet.cdr).data);
+      else if (role == "camera")
+        latest_images[packet.topic] = &packet;
     }
-    double logit = second_bias_;
-    for (std::size_t h = 0; h < hidden; ++h) logit += second_[h] * layer[h];
-    const double score = 1.0 / (1.0 + std::exp(-logit));
-    if (score < deployment_.value("candidate_threshold", 0.9)) return std::nullopt;
-    const auto deployment_id = deployment_.at("id").get<std::string>();
-    return Detection{deployment_id, deployment_.at("classes")[0].get<std::string>(), score,
-                     5, 2, "bootstrap_untrained_critic", deployment_id, false};
+    for (const auto &[name, packet] : latest_images) {
+      (void)name;
+      add_image(features, decode_bytes<sensor_msgs::msg::Image>(*packet->cdr));
+    }
+    std::optional<Detection> best;
+    std::map<std::uint32_t,
+             std::array<float, critic_embedding_dimensions>> embeddings;
+    for (std::size_t i = 0; i < deployment_["heads"].size(); ++i) {
+      if (!due[i]) continue;
+      const auto &head = deployment_["heads"][i];
+      const auto mask = head["required_roles_mask"].get<std::uint32_t>();
+      const auto age = static_cast<Ns>(std::llround(
+          head["scope"]["max_input_age_ms"].get<double>() * 1e6));
+      bool fresh = true;
+      for (std::size_t role = 0; role < role_times.size(); ++role)
+        if ((mask & (1U << role)) != 0)
+          fresh = fresh && role_times[role] >= 0 &&
+                  observations.receipt_ros_ns - role_times[role] <= age;
+      if (!fresh) {
+        telemetry_["scores"][head["proposition_id"].get<std::string>()] =
+            {{"status", "insufficient_evidence"}, {"probability", nullptr},
+             {"missed_deadlines", missed_deadlines_[i]}};
+        continue;
+      }
+      if (!embeddings.contains(mask)) embeddings[mask] = features.embedding(mask);
+      const auto &embedding = embeddings.at(mask);
+      float similarity = -1;
+      for (const auto &center : head["centers"]) {
+        require(center.is_array() && center.size() == embedding.size(),
+                "invalid proposition center");
+        float dot = 0;
+        for (std::size_t d = 0; d < embedding.size(); ++d)
+          dot += embedding[d] * center[d].get<float>();
+        similarity = std::max(similarity, std::clamp(dot, -1.F, 1.F));
+      }
+      const auto confidence = (static_cast<double>(similarity) + 1.0) / 2.0;
+      telemetry_["scores"][head["proposition_id"].get<std::string>()] =
+          {{"status", "score"}, {"similarity", similarity},
+           {"confidence_proxy", confidence}, {"probability", nullptr},
+           {"threshold", head.value("candidate_threshold", 0.95)},
+           {"missed_deadlines", missed_deadlines_[i]},
+           {"receipt_ros_ns", observations.receipt_ros_ns}};
+      if (confidence < head.value("candidate_threshold", 0.9)) continue;
+      if (!best || confidence > best->confidence)
+        best = Detection{deployment_["id"], head["proposition_id"], confidence,
+                         5, 2, "profile_proposition_bank_v1",
+                         deployment_["id"], false};
+    }
+    telemetry_["last_evaluation_us"] =
+        static_cast<double>(monotonic_ns() - evaluation_started) / 1000.0;
+    telemetry_["deployment_id"] = deployment_["id"];
+    return best;
   }
 };
 std::pair<bool, Json> validate(const Json &topic, const Json &config,
@@ -239,7 +310,7 @@ class Observer {
   std::unique_ptr<Store> store_;
   CriticInferencePlaceholder no_inference_, runtime_critic_;
   CriticAdapter *inference_ = &no_inference_;
-  std::unique_ptr<BootstrapCritic> bootstrap_critic_;
+  std::unique_ptr<ProfileCritic> profile_critic_;
   RecoveryControllerPlaceholder controller_;
   std::unique_ptr<Runtime> runtime_;
   rclcpp::Node::SharedPtr node_;
@@ -248,6 +319,7 @@ class Observer {
   rclcpp::Publisher<String>::SharedPtr events_, replies_, profiles_;
   std::vector<rclcpp::GenericSubscription::SharedPtr> subscriptions_;
   rclcpp::Subscription<String>::SharedPtr requests_;
+  rclcpp::TimerBase::SharedPtr critic_timer_;
   std::map<std::string, Ns> counts_, last_wall_, detection_marks_;
   std::map<std::string, std::pair<std::string, Json>> responses_;
   std::deque<std::string> response_order_;
@@ -303,14 +375,14 @@ class Observer {
     if (type != "rosgraph_msgs/msg/Clock") {
       const auto &bytes = data->get_rcl_serialized_message();
       history_.push_back({name, type,
-                          std::vector<std::uint8_t>(
+                          std::make_shared<const std::vector<std::uint8_t>>(
                               bytes.buffer, bytes.buffer + bytes.buffer_length),
                           now});
       raw_bytes_ += bytes.buffer_length;
       while (!history_.empty() &&
              (raw_bytes_ > 16 * 1024 * 1024 ||
               now - history_.front().receipt_ros_ns > 20000000000LL)) {
-        raw_bytes_ -= history_.front().cdr.size();
+        raw_bytes_ -= history_.front().cdr->size();
         history_.pop_front();
       }
       bool valid = false;
@@ -420,32 +492,6 @@ class Observer {
   void status() {
     tick();
     evidence_.expire();
-    bool fresh = true;
-    try {
-      evidence_.check_live();
-    } catch (const std::exception &) {
-      fresh = false;
-    }
-    Observations observations;
-    observations.config = config_;
-    observations.epoch = evidence_.state["epoch"].get<Ns>();
-    observations.receipt_ros_ns = *evidence_.now;
-    observations.messages.assign(history_.begin(), history_.end());
-    if (fresh && store_)
-      if (const auto detection = inference_->evaluate(observations)) {
-        try {
-          event("candidate_marked", {{"window", candidate(detection->json())}});
-        } catch (const std::exception &e) {
-          event("candidate_skipped", {{"reason", e.what()}});
-        }
-      }
-    if (runtime_) {
-      const auto result = runtime_->step(
-          observations, static_cast<double>(monotonic_ns()) / 1e9, fresh);
-      if (!result.is_null())
-        event("runtime", {{"transition", result}});
-      evidence_.state["runtime"] = runtime_->snapshot();
-    }
     for (const auto &window : evidence_.state["windows"])
       if (window["status"] == "ready" &&
           !announced_.contains(window["id"].get<std::string>())) {
@@ -507,6 +553,32 @@ class Observer {
     require(fs::space(session_).available >= 250000000,
             "recording stopped: less than 250 MB free space");
   }
+  void critic_tick() {
+    tick();
+    if (!evidence_.now || !store_) return;
+    bool fresh = true;
+    try { evidence_.check_live(); }
+    catch (const std::exception &) { fresh = false; }
+    Observations observations;
+    observations.config = config_;
+    observations.epoch = evidence_.state["epoch"].get<Ns>();
+    observations.receipt_ros_ns = *evidence_.now;
+    observations.messages.assign(history_.begin(), history_.end());
+    if (fresh)
+      if (const auto detection = inference_->evaluate(observations)) {
+        try { event("candidate_marked", {{"window", candidate(detection->json())}}); }
+        catch (const std::exception &error) {
+          event("candidate_skipped", {{"reason", error.what()}});
+        }
+      }
+    if (runtime_) {
+      const auto result = runtime_->step(
+          observations, static_cast<double>(monotonic_ns()) / 1e9, fresh);
+      if (!result.is_null()) event("runtime", {{"transition", result}});
+      evidence_.state["runtime"] = runtime_->snapshot();
+    }
+    evidence_.state["critic"] = inference_->telemetry();
+  }
 
 public:
   Observer(const Options &options, fs::path session, Json config,
@@ -521,12 +593,13 @@ public:
             "at least 1 GB free space required");
     if (options_.values.contains("--store")) {
       store_ = std::make_unique<Store>(options_.path("--store"));
-      require(store_->snapshot()["binding_hash"] == digest(config_),
+      const auto profile = store_->snapshot();
+      require(profile["binding_hash"] == digest(config_),
               "observer config differs from workflow binding");
-      const auto deployment = store_->snapshot().value("critic_deployment", Json(nullptr));
-      if (deployment.is_object() && deployment.value("runtime", "") == "bootstrap_mlp_v1") {
-        bootstrap_critic_ = std::make_unique<BootstrapCritic>(deployment);
-        inference_ = bootstrap_critic_.get();
+      const auto deployment = profile.value("critic_deployment", Json(nullptr));
+      if (deployment.is_object() && deployment.value("executable", false)) {
+        profile_critic_ = std::make_unique<ProfileCritic>(deployment);
+        inference_ = profile_critic_.get();
       }
       runtime_ =
           std::make_unique<Runtime>(*store_, runtime_critic_, controller_);
@@ -584,6 +657,14 @@ public:
     }
     requests_ = node_->create_subscription<String>(
         prefix_ + "/requests", 10, [this](const String &m) { request(m); });
+    if (profile_critic_) {
+      double rate = 1;
+      for (const auto &head : store_->snapshot()["critic_deployment"]["heads"])
+        rate = std::max(rate, head["scope"]["required_hz"].get<double>());
+      const auto period = std::chrono::nanoseconds(
+          static_cast<Ns>(std::llround(1e9 / std::min(rate, 2000.0))));
+      critic_timer_ = node_->create_wall_timer(period, [this] { critic_tick(); });
+    }
   }
   void run() {
     const auto started = monotonic_ns();
@@ -592,7 +673,7 @@ public:
     evidence_.state["status"] = "observing";
     try {
       Json critics = Json::array();
-      if (bootstrap_critic_)
+      if (profile_critic_)
         critics.push_back(store_->snapshot()["critic_deployment"]);
       event("observer_started", {{"session", session_.string()},
                                  {"critics", critics},
@@ -604,7 +685,7 @@ public:
       while (rclcpp::ok(context_) &&
              static_cast<double>(monotonic_ns() - started) / 1e9 <
                  options_.number("--wall-timeout", 1800)) {
-        executor.spin_once(std::chrono::milliseconds(100));
+        executor.spin_once(std::chrono::milliseconds(1));
         if (monotonic_ns() >= next_status) {
           status();
           next_status = monotonic_ns() + 1000000000LL;
@@ -633,6 +714,74 @@ public:
   }
 };
 } // namespace
+Json compile_snapshot_embedding(const fs::path &artifact, const Json &binding,
+                                const Json &window,
+                                std::uint32_t required_roles) {
+  constexpr auto supported = critic_joint_state | critic_action | critic_camera;
+  if ((required_roles & ~supported) != 0)
+    return {{"status", "unsupported_modalities"},
+            {"error", "first-deploy encoder supports joint_state, action and camera roles"}};
+  require(fs::is_regular_file(artifact), "accepted MCAP artifact is missing");
+  std::map<std::string, Json> topics;
+  for (const auto &topic : binding["topics"])
+    topics[topic["name"].get<std::string>()] = topic;
+  const auto joints = binding["joint_order"].get<std::vector<std::string>>();
+  const auto end = window.contains("mark_ns")
+                       ? window["mark_ns"].get<Ns>()
+                       : window.at("end_ns").get<Ns>();
+  const auto begin =
+      std::max(window.at("start_ns").get<Ns>(), end - 1000000000LL);
+  rosbag2_cpp::Reader reader;
+  rosbag2_storage::StorageOptions storage;
+  storage.uri = artifact.string();
+  storage.storage_id = "mcap";
+  reader.open(storage, {"cdr", "cdr"});
+  std::map<std::string, std::string> types;
+  for (const auto &topic : reader.get_all_topics_and_types())
+    types[topic.name] = topic.type;
+  CriticFeatureAccumulator features;
+  std::map<std::string, std::vector<std::uint8_t>> latest_images;
+  while (reader.has_next()) {
+    const auto message = reader.read_next();
+    if (message->recv_timestamp < begin || message->recv_timestamp > end ||
+        !topics.contains(message->topic_name))
+      continue;
+    const auto &topic = topics.at(message->topic_name);
+    const auto role = topic.value("role", "");
+    if ((required_roles & critic_role_bit(role)) == 0) continue;
+    require(types.at(message->topic_name) == topic.at("type"),
+            "accepted MCAP schema differs from profile binding");
+    const auto &raw = *message->serialized_data;
+    require(raw.buffer_length <= 64 * 1024 * 1024,
+            "accepted MCAP packet exceeds size limit");
+    std::vector<std::uint8_t> bytes(raw.buffer, raw.buffer + raw.buffer_length);
+    if (role == "joint_state")
+      add_joint(features, decode_bytes<sensor_msgs::msg::JointState>(bytes), joints);
+    else if (role == "action")
+      features.action(
+          decode_bytes<std_msgs::msg::Float64MultiArray>(bytes).data);
+    else if (role == "camera")
+      latest_images[message->topic_name] = std::move(bytes);
+  }
+  for (const auto &[name, bytes] : latest_images) {
+    (void)name;
+    add_image(features, decode_bytes<sensor_msgs::msg::Image>(bytes));
+  }
+  if ((features.roles() & required_roles) != required_roles)
+    return {{"status", "insufficient_evidence"},
+            {"available_roles_mask", features.roles()},
+            {"required_roles_mask", required_roles}};
+  const auto vector = features.embedding(required_roles);
+  Json values = Json::array();
+  for (const auto value : vector) values.push_back(value);
+  return {{"status", "ready"},
+          {"encoder", critic_feature_encoder},
+          {"roles_mask", features.roles()},
+          {"window", {{"start_ns", begin}, {"end_ns", end}}},
+          {"vector", std::move(values)}};
+}
+bool snapshot_compiler_available() { return true; }
+
 Json ros_start(const Options &options) {
   const auto config = load_config(options.need("--config"));
   const auto session = options.path("--session");

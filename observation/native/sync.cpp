@@ -85,24 +85,6 @@ public:
     return result;
   }
 
-  Json critic_deployment(const std::string &profile_id) override {
-    CURL *curl = curl_easy_init();
-    require(curl != nullptr, "could not initialize HTTPS request");
-    char *profile = curl_easy_escape(curl, profile_id.c_str(),
-                                     static_cast<int>(profile_id.size()));
-    char *device = curl_easy_escape(curl, credentials_.device_id.c_str(),
-                                    static_cast<int>(credentials_.device_id.size()));
-    require(profile != nullptr && device != nullptr,
-            "could not encode critic deployment request");
-    const std::string path = "/harness-profiles/edge/" +
-                             std::string(profile) + "/critic-deployment?device_id=" +
-                             std::string(device);
-    curl_free(profile);
-    curl_free(device);
-    curl_easy_cleanup(curl);
-    return request("GET", path, nullptr);
-  }
-
   void upload_enforcements(const std::string &robot_id,
                            const Json &records) override {
     request("POST", "/harness-profiles/edge/enforcements",
@@ -222,18 +204,6 @@ Json WorkflowConnector::cycle(bool heartbeat) {
     store_.acknowledge_sync_receipts(receipts);
     uploaded_revision_ = snapshot.at("revision").get<Ns>();
     last_upload_monotonic_ns_ = monotonic_ns();
-  }
-  const auto deployment =
-      transport_.critic_deployment(snapshot.at("profile_id").get<std::string>());
-  if (deployment.is_object() && !deployment.empty() &&
-      snapshot.value("critic_deployment", Json(nullptr)) != deployment) {
-    const auto request = Json{
-        {"schema_version", 1}, {"request_id", "critic-" + deployment.at("id").get<std::string>()},
-        {"actor", "backend_critic_deployer"}, {"expected_revision", snapshot.at("revision")},
-        {"operation", "install_critic"}, {"payload", {{"deployment", deployment}}}};
-    store_.apply(request);
-    snapshot = store_.snapshot();
-    uploaded_revision_ = -1; // report the installed deployment next cycle
   }
   const auto enforcements = store_.pending_enforcements();
   if (!enforcements.empty()) {

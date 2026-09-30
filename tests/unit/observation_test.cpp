@@ -2,6 +2,7 @@
 #include "events.hpp"
 #include "runtime.hpp"
 #include "sync.hpp"
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -141,7 +142,6 @@ struct FakeController final : ControllerAdapter {
 };
 struct FakeWorkflowTransport final : WorkflowTransport {
   Json commands = Json::array();
-  Json deployment = nullptr;
   std::vector<Json> uploads;
   std::vector<Json> enforcement_uploads;
   bool fail_upload = false;
@@ -157,7 +157,6 @@ struct FakeWorkflowTransport final : WorkflowTransport {
     commands = Json::array();
     return result;
   }
-  Json critic_deployment(const std::string &) override { return deployment; }
   void upload_enforcements(const std::string &robot_id, const Json &records) override {
     if (fail_upload) throw std::runtime_error("offline");
     enforcement_uploads.push_back({{"robot_id", robot_id}, {"records", records}});
@@ -208,39 +207,64 @@ void evidence_tests() {
 }
 void workflow_tests() {
   {
-    Fixture critic_sync;
-    FakeWorkflowTransport transport;
-    const auto initial = critic_sync.store.snapshot();
-    transport.deployment = {
-        {"schema_version", 1}, {"id", "critic-test"},
-        {"profile_id", initial["profile_id"]},
-        {"profile_revision", initial["revision"]},
-        {"binding_hash", initial["binding_hash"]},
-        {"runtime", "bootstrap_mlp_v1"}, {"mode", "shadow"},
-        {"trained", false}, {"deployment_validated", false},
-        {"classes", {"behavior_anomaly"}}, {"seed", "0123456789abcdef"},
-        {"candidate_threshold", 0.9}, {"minimum_samples", 8}};
-    WorkflowConnector connector(critic_sync.store,
-                                "00000000-0000-4000-8000-000000000102",
-                                transport);
-    const auto installed = connector.cycle();
-    check(installed["critic_deployment"]["id"] == "critic-test" &&
-              critic_sync.store.snapshot()["enforcement_status"] == "shadow",
-          "sync installs the per-profile shadow critic");
-    const auto revision = critic_sync.store.snapshot()["revision"];
-    connector.cycle();
-    check(critic_sync.store.snapshot()["revision"] == revision,
-          "unchanged critic deployment is idempotent");
-    critic_sync.store.record_enforcement(
-        {{"schema_version", 1}, {"event_id", "enforcement-sync-test"},
-         {"profile_id", initial["profile_id"]}, {"deployment_id", nullptr},
-         {"failure_id", nullptr}, {"mode", "active"}, {"outcome", "fallback"},
-         {"started_wall_ns", wall_ns()}, {"ended_wall_ns", wall_ns()},
-         {"integrity", Json::object()}, {"record", Json::object()}});
-    connector.cycle();
-    check(transport.enforcement_uploads.size() == 1 &&
-              critic_sync.store.pending_enforcements().empty(),
-          "sync uploads and acknowledges durable enforcement records");
+    Fixture f;
+    const Json scope = {{"required_hz", 200}, {"max_input_age_ms", 10},
+                         {"required_roles", {"joint_state", "action"}}};
+    const auto proposition = f.apply("add_proposition",
+        {{"proposition_id", "tracking_divergence"},
+         {"description", "Commanded motion diverges from measured motion"}, {"scope", scope}});
+    check(proposition["snapshots"].empty() && proposition["recovery"].is_null(),
+          "guard can exist before any failure or recovery");
+    check(!f.store.snapshot()["critic_profile_ready"],
+          "proposition alone does not activate inference");
+    f.apply("set_critic_context",
+            {{"context",
+              {{"schema_version", 1}, {"task", "Pick and place"},
+               {"embodiment", {{"class_id", "so101"},
+                                {"joint_names", f.binding["joint_order"]}}}}}});
+    const auto first_compilation = f.store.snapshot();
+    check(first_compilation["critic_profile_ready"] &&
+              first_compilation["critic_deployment"]["runtime"] == "proposition_bank_v1" &&
+              first_compilation["critic_compilation"]["generation"] == 1 &&
+              first_compilation["critic_runtime_status"] == "awaiting_examples" &&
+              first_compilation["critic_deployment"]["executable"] == false,
+          "profile setup creates the first edge-compiled proposition model");
+    const auto first_model_hash =
+        first_compilation["critic_compilation"]["model_hash"];
+    for (int i = 0; i < 2; ++i) {
+      const auto candidate = f.candidate();
+      f.apply("accept_failure", {{"candidate_id", candidate["id"]},
+          {"description", "divergence"}, {"guidance", "hold"},
+          {"proposition_id", "tracking_divergence"}});
+    }
+    const auto snapshots = f.store.snapshot()["propositions"]["tracking_divergence"]["snapshots"];
+    check(snapshots.size() == 2 && snapshots[0]["evidence"]["kind"] == "evidence_mcap" &&
+              snapshots[0]["failure_id"] != snapshots[1]["failure_id"],
+          "accepted moments accumulate under one proposition with immutable MCAP evidence");
+    const auto trained_input = f.store.snapshot();
+    check(trained_input["critic_compilation"]["generation"] == 3 &&
+              trained_input["critic_compilation"]["model_hash"] != first_model_hash &&
+              trained_input["critic_runtime_status"] == "awaiting_ros_runtime" &&
+              trained_input["critic_deployment"]["executable"] == false,
+          "each accepted proposition moment rebuilds a new model generation");
+    f.apply("add_proposition",
+            {{"proposition_id", "collision"}, {"description", "Avoid collision"},
+             {"scope", scope}});
+    check(f.store.snapshot()["critic_compilation"]["generation"] == 4 &&
+              f.store.snapshot()["critic_deployment"]["classes"].size() == 2,
+          "adding a proposition rebuilds the edge model without reinstalling");
+  }
+  {
+    Fixture empty_profile;
+    const auto state = empty_profile.store.snapshot();
+    check(state["critic_deployment"].is_null() &&
+              state["critic_compilation"].is_null() &&
+              state["enforcement_status"] == "unavailable" &&
+              state["critic_runtime_status"] == "awaiting_profile_setup" &&
+              std::find(state["placeholders"].begin(),
+                        state["placeholders"].end(),
+                        "critic_inference") != state["placeholders"].end(),
+          "installation carries no bootstrap model and an empty profile cannot infer");
   }
   {
     const auto config_path = fs::path(HARNESS_OBSERVATION_CONFIG);
@@ -309,6 +333,17 @@ void workflow_tests() {
                   "00000000-0000-4000-8000-000000000003" &&
               sync.store.pending_sync_receipts().empty(),
           "durable command receipt uploads and clears after reconnecting");
+    const auto profile = sync.store.snapshot();
+    sync.store.record_enforcement(
+        {{"schema_version", 1}, {"event_id", "enforcement-sync-test"},
+         {"profile_id", profile["profile_id"]}, {"deployment_id", nullptr},
+         {"failure_id", nullptr}, {"mode", "active"}, {"outcome", "fallback"},
+         {"started_wall_ns", wall_ns()}, {"ended_wall_ns", wall_ns()},
+         {"integrity", Json::object()}, {"record", Json::object()}});
+    connector.cycle();
+    check(transport.enforcement_uploads.size() == 1 &&
+              sync.store.pending_enforcements().empty(),
+          "sync uploads and acknowledges durable enforcement records");
   }
   {
     Fixture offline;
@@ -369,16 +404,6 @@ void workflow_tests() {
       "exact");
   f.apply("approve_bundle",
           {{"bundle_id", b["id"]}, {"content_hash", b["content_hash"]}});
-  const auto profile_before_critic = f.store.snapshot();
-  f.apply("install_critic",
-          {{"deployment",
-            {{"schema_version", 1}, {"id", "validated-deployment"},
-             {"profile_id", profile_before_critic["profile_id"]},
-             {"profile_revision", profile_before_critic["revision"]},
-             {"binding_hash", profile_before_critic["binding_hash"]},
-             {"runtime", "test_trained_critic"}, {"mode", "shadow"},
-             {"trained", true}, {"deployment_validated", true},
-             {"classes", {"target_moved"}}}}});
   Json coverage = Json::object();
   for (const auto &topic : f.binding["topics"])
     coverage[topic["name"].get<std::string>()] = {{"valid_count", 5}};
@@ -394,9 +419,9 @@ void workflow_tests() {
   routed = f.apply("attach_evidence",
                    {{"candidate_id", routed["id"]},
                     {"artifact", f.artifact("evidence_mcap")}});
-  check(routed["status"] == "approved_recovery_match" &&
-            routed["approved_recovery_match"]["bundle_id"] == b["id"],
-        "validated critic routes only to an already approved recovery");
+  check(routed["status"] == "pending_review" &&
+            routed["approved_recovery_match"].is_null(),
+        "detector claims cannot bypass the edge-compiled deployment identity");
   const auto new_job =
       f.apply("request_demonstration", {{"failure_id", b["failure_id"]},
                                         {"requested_model", "external"}});

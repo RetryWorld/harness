@@ -243,7 +243,13 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
       }
       const auto profile = Store(store).snapshot();
       const auto critic = profile.value("critic_deployment", Json(nullptr));
-      const auto critic_id = critic.is_object() ? critic.value("id", "") : "";
+      // A compiled contract that is still waiting for examples/embeddings is
+      // visible in status, but must not disrupt observation or masquerade as
+      // a live model. Only an executable generation reaches the observer.
+      const auto critic_id =
+          critic.is_object() && critic.value("executable", false)
+              ? critic.value("id", "")
+              : "";
       if (observer_pid > 0 && critic_id != active_critic_id) {
         ::kill(observer_pid, SIGTERM);
         wait_child(observer_pid);
@@ -285,7 +291,10 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
       export_pending_windows(store, active_session);
       write_status("running", config, {{"domain_id", *domain},
                    {"store", store.string()}, {"session", active_session.string()},
-                   {"critic", critic}});
+                   {"critic", critic},
+                   {"critic_profile_ready", profile.value("critic_profile_ready", false)},
+                   {"critic_runtime_status",
+                    profile.value("critic_runtime_status", "awaiting_profile_setup")}});
     }
     for (int i = 0; i < 10 && !service_stopping; ++i)
       std::this_thread::sleep_for(std::chrono::milliseconds(200));

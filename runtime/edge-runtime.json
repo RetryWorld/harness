@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ros_distribution": "jazzy",
+  "supported_os": "ubuntu-noble",
+  "observation": "native_ros2",
+  "recording_storage": "mcap",
+  "critic_runtime": "native_cpp",
+  "installed_model": null,
+  "critic_compiler": "edge_profile_compiler_v1",
+  "target_model": "profile_compiled_proposition_bank_v1",
+  "target_model_status": "compiled_after_profile_update",
+  "first_deploy_encoder": "role_window_stats64_v1",
+  "first_deploy_modalities": ["joint_state", "action", "camera"],
+  "critic_activation": "after_profile_setup",
+  "optimized_vision_backend": "tensorrt",
+  "portable_model_format": "onnx"
+}

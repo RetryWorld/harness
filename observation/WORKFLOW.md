@@ -15,12 +15,15 @@ profile + ROS/MCAP -> per-profile critic -> evidence window
   -> approved runtime gate -> recovery controller -> enforcement record
 ```
 
-The install-time `bootstrap_mlp_v1` makes inference real before training data
-exists. It is deterministic per profile, native C++, untrained, uncalibrated,
-and forced to `shadow`. It may create candidates; it cannot select a recovery
-or activate a controller. Only a deployment marked `deployment_validated` may
-route a detection to an existing immutable approved bundle, by exact evidence
-class or an explicitly approved semantic alias.
+No bootstrap classifier is installed. A workflow with incomplete task,
+embodiment, or proposition context records ROS/MCAP but does not infer. Every
+relevant profile mutation compiles a new content-addressed proposition model in
+the same SQLite transaction as the new revision. A generation stays dormant
+until every proposition has an accepted MCAP example and all declared roles are
+supported. Only a deployment marked
+`deployment_validated` may route a detection to an existing
+immutable approved bundle, by exact evidence class or an explicitly approved
+semantic alias.
 
 Active enforcement remains fail-closed: activation still requires an approved
 bundle, a hash-verified critic artifact, and a ready recovery-controller
@@ -40,11 +43,13 @@ local critic adapter → candidate window → pending profile review
     → adapter readiness check → local recovery supervision
 ```
 
-The active recovery controller and trained learned-critic adapter are explicit
-C++ placeholders in [native/runtime.hpp](native/runtime.hpp). They do not
-report readiness or silently acknowledge actuator operations. The bootstrap
-shadow critic is separate and runs native inference. The edge exports an exact
-generation package; the trusted internal Modal generator calls the model. No
+The recovery controller and learned ONNX/TensorRT adapter remain explicit C++
+placeholders in [native/runtime.hpp](native/runtime.hpp); they do not report
+readiness or silently acknowledge actuator operations. For first deployment,
+the edge compiler and observer share a deterministic 64-D role-window encoder.
+Accepted MCAP windows become bounded proposition centers and an executable
+shadow generation. This path can create review candidates but cannot authorize
+recovery. The trusted internal Modal generator calls the recovery model; no
 behavior-cloning training is performed here.
 
 The current CLI can complete review and local installation with externally
@@ -105,9 +110,8 @@ binding. The in-memory inference context is bounded to 20 ROS seconds and
 16 MiB (whichever limit is reached first); it may be shorter than the disk
 recording. Full evidence is recorded to disk independently.
 
-The installed `bootstrap_mlp_v1` evaluates live bounded observations, but it is
-untrained and uncalibrated. To exercise its downstream interface
-deterministically while a policy and sensors are live:
+To exercise the downstream candidate interface deterministically while a policy
+and sensors are live:
 
 ```bash
 "$CLI" observe candidate --session "$SESSION" \
@@ -128,6 +132,38 @@ wall seconds. If the clock stops during collection, the window becomes
 `incomplete` after fifteen wall seconds. A reset invalidates open windows.
 
 ## Candidate → confirmed failure and guidance
+
+The native workflow also supports proposition definitions before any failure
+exists. `workflow apply --operation add_proposition` accepts a payload such as:
+
+```json
+{
+  "proposition_id": "tracking_divergence",
+  "description": "Commanded motion diverges from measured motion",
+  "candidate_threshold": 0.95,
+  "scope": {
+    "required_hz": 200,
+    "max_input_age_ms": 10,
+    "required_roles": ["joint_state", "action"]
+  }
+}
+```
+
+The profile stores `propositions` keyed by ID, with empty `snapshots` and a null
+`recovery`. Include `proposition_id` in an `accept_failure` payload to append
+the exact accepted MCAP artifact and window. Legacy acceptance without that
+field remains supported but does not assign the failure to a guard.
+`link_proposition_recovery` requires `proposition_id`, `bundle_id` and the exact
+approved `content_hash`; the bundle must originate from that proposition's
+accepted evidence. A link does not activate the controller.
+
+`set_critic_context` accepts `{"context": <CriticContext v1>}` to store task and
+embodiment inputs. Context compilation verifies these against the observation
+binding. Proposition changes require rebuilding the scoring bank; context edits
+produce a new generation while reusing immutable snapshot embeddings. These
+operations are available through native `workflow apply`. The live first-deploy
+encoder is wired to this contract; web authoring and the trained v2
+ONNX/TensorRT encoder are not yet wired to it.
 
 After `candidate_pending` appears in the observer terminal:
 

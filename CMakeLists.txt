@@ -403,6 +403,8 @@ install(TARGETS harness_kernel harness_kernel_static harness_cli harness_critic 
 install(DIRECTORY include/harness DESTINATION include)
 install(FILES observation/so101.json observation/g1_warehouse.json
         DESTINATION share/harness/observation)
+install(FILES runtime/edge-runtime.json DESTINATION share/harness/runtime)
+install(PROGRAMS scripts/install_runtime_deps.sh DESTINATION share/harness/install)
 
 if(HARNESS_BUILD_TESTS)
   add_executable(harness_abi_consumer tests/abi/c_consumer.c)

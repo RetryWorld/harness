@@ -4,8 +4,9 @@
 #
 #   curl -fsSL https://rearguard.dev/install | sh && export PATH="$HOME/.harness/bin:$PATH"
 #
-# This does NOT compile anything and does NOT touch a package manager. It
-# downloads the same tarball `build_artifact.sh` produces and GitHub Actions
+# This does not compile anything. It installs the supported ROS 2 runtime and
+# MCAP storage plugin when absent, then downloads the same tarball
+# `build_artifact.sh` produces and GitHub Actions
 # publishes to a release, verifies it against `release-manifest.json`'s
 # sha256, and unpacks it. That is the same artifact the simulation rig loads
 # (see README.md, "Releasing") — there is no separate "install path" that could
@@ -103,9 +104,21 @@ tar -C "$WORK/extracted" -xzf "$WORK/kernel.tar.gz"
 EXTRACTED_ROOT="$(find "$WORK/extracted" -mindepth 1 -maxdepth 1 -type d | head -1)"
 [ -n "$EXTRACTED_ROOT" ] || err "unexpected tarball layout"
 
+EXTRACTED_RUNTIME_CONTRACT="$EXTRACTED_ROOT/share/harness/runtime/edge-runtime.json"
+EXTRACTED_RUNTIME_INSTALLER="$EXTRACTED_ROOT/share/harness/install/install_runtime_deps.sh"
+[ -r "$EXTRACTED_RUNTIME_CONTRACT" ] || err "release is missing its edge runtime contract"
+[ -x "$EXTRACTED_RUNTIME_INSTALLER" ] || err "release is missing its ROS runtime installer"
+step "Installing ROS 2 Jazzy recording runtime when needed"
+"$EXTRACTED_RUNTIME_INSTALLER"
+"$EXTRACTED_RUNTIME_INSTALLER" --check
+okay "ROS 2 and MCAP recording are ready"
+
 mkdir -p "$INSTALL_DIR"
 rm -rf "$INSTALL_DIR/bin" "$INSTALL_DIR/lib" "$INSTALL_DIR/include" "$INSTALL_DIR/share"
 cp -r "$EXTRACTED_ROOT/." "$INSTALL_DIR/"
+
+RUNTIME_CONTRACT="$INSTALL_DIR/share/harness/runtime/edge-runtime.json"
+[ -r "$RUNTIME_CONTRACT" ] || err "release is missing its edge runtime contract"
 
 # rearguard, not "harness-kernel": the v1 daemon (src/main.cpp, --version/
 # --abi) is gone, and the only executable the tarball carries now is the CLI
@@ -119,6 +132,13 @@ step "Checking installed CLI"
 # that happens to exist.
 "$BIN" abi
 okay "CLI is ready"
+
+CRITIC_BIN="$INSTALL_DIR/bin/harness_critic"
+[ -x "$CRITIC_BIN" ] || err "install completed but the critic compiler/runtime is missing"
+okay "Dynamic proposition critic compiler/runtime is installed"
+grep -q '"critic_activation"[[:space:]]*:[[:space:]]*"after_profile_setup"' "$RUNTIME_CONTRACT" \
+  || err "release permits critic activation before profile setup"
+okay "Critic inference is gated on completed profile setup"
 
 # Persist the path in login and interactive shell startup files. A script
 # executed through `curl | sh` cannot mutate its parent shell; the public

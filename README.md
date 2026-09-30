@@ -28,12 +28,15 @@ The kernel does four things, in this order, every control cycle:
 ```
 harness-kernel-<version>-<target>.tar.gz
 ├── bin/rearguard                    validate | show | replay | verify | hash | diff | abi
+├── bin/harness_critic               native learned-critic diagnostics and replay
 ├── lib/libharness_kernel.so           dlopen or link from any language
 ├── lib/libharness_kernel.a            static link into your own binary
 ├── lib/libthreshold_critic.so         reference critic
 ├── lib/libstall_critic.so             reference critic
 ├── include/harness/harness_kernel.h   the kernel contract
 ├── include/harness/harness_critic.h   the critic contract
+├── share/harness/runtime/edge-runtime.json
+│                                         edge compilation/runtime contract
 └── share/proto/harness/v1/*.proto     wire format: profile, enforcement events, provenance, critics
 ```
 
@@ -49,12 +52,23 @@ enforces them"* a property of the build rather than a claim in a document.
 curl -fsSL https://rearguard.dev/install | sh && export PATH="$HOME/.harness/bin:$PATH"
 ```
 
-Downloads the release tarball, verifies its SHA256 against the published
+Installs the supported ROS 2 Jazzy runtime and MCAP storage plugin when absent,
+downloads the release tarball, verifies its SHA256 against the published
 manifest, unpacks to `~/.harness`, and adds `~/.harness/bin` to your `PATH`.
 The one-liner's final `export` makes it available in the current terminal too.
 Override with `HARNESS_INSTALL_DIR`, pin a version with `./install.sh v0.2.0`.
 
-It compiles nothing and touches no package manager.
+The release binary itself is precompiled. On a supported Ubuntu edge host, the
+installer uses apt to add missing ROS 2 Jazzy and MCAP runtime packages.
+
+The install includes the native dynamic critic compiler/runtime plus ROS
+discovery, observation, rosbag2, and MCAP recording support. It installs no
+bootstrap classifier. Critic inference remains dormant until the workflow
+contains both an explicit task/embodiment `critic_context` and at least one
+guard proposition. Each relevant profile revision is compiled on the edge into
+a new content-addressed proposition deployment. Every proposition needs an
+accepted MCAP moment before that generation becomes executable; the
+first-deploy encoder supports joint state, action, and raw camera roles.
 
 ### Uninstall
 

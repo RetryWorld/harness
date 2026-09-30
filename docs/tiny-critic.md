@@ -9,12 +9,24 @@ emits timestamped experimental scores. A bounded worker utility replaces queued
 work with the latest request and invalidates results across resets or expiry.
 Inference is not part of the realtime kernel ABI.
 
-The live observer now has an install-time native bootstrap MLP for the
-untrained phase. It is a separate, shadow-only detector and is intentionally
-not controller-ready. The TinyCLIP/TensorRT executable supports completed MCAP
-replay and canonical-tensor diagnostics; connecting that learned bundle to the
-same live adapter remains the next runtime replacement. Uncalibrated model
-scores cannot establish controller readiness.
+No classifier is installed before a Harness Profile is configured. The native
+runtime is installed once; each relevant profile revision then builds a
+content-addressed proposition bank on the edge. Adding a proposition,
+accepting a failure snapshot, changing task/embodiment context, or linking a
+recovery produces a new generation atomically with the profile revision.
+
+The first-deploy encoder is `role_window_stats64_v1`: a deterministic C++
+encoder over the final causal second of joint state, action and raw camera data.
+Accepted MCAP moments are compiled into at most four normalized centers per
+proposition. The live observer runs the same encoder, masks features to each
+proposition's declared roles, and evaluates at the fastest declared MUST rate.
+Adding an empty proposition disables the whole generation until it has an
+accepted example, so an old model can never silently omit a new guard.
+
+Scores are uncalibrated cosine similarity, not posterior probabilities. The
+existing learned TinyCLIP/TensorRT path remains the intended encoder upgrade;
+its artifact can replace this fixed 64-D encoder without changing the dynamic
+bank lifecycle.
 
 ## Build on Jetson
 
@@ -111,10 +123,10 @@ tests the new tensor, preprocessing, and worker code without either SDK.
 
 ## Remaining acceptance work
 
-The native CPU path and Python export path are tested locally. The ROS2 MCAP
-and TensorRT implementations require Linux/Jetson compilation and acceptance
-testing. The Modal entry point has not been executed. Before connecting this
-critic to live candidate generation, finish the worker/observer wiring, train
-on reviewed real failure windows, validate cross-embodiment behavior, and measure
-policy latency and memory under concurrent load. Runtime activation additionally
-requires the existing separate controller and approval contracts.
+The live proposition bank now creates review candidates, but remains shadow
+only. The ROS2 MCAP integration test runs on the Linux release job; the first
+robot deployment still needs measured scheduler jitter, CPU use and nuisance
+candidate rate under the real policy. The learned ONNX/TensorRT replacement
+still needs trained weights, target engine generation, invariance validation
+and on-device timing admission. Runtime recovery activation additionally
+requires the separate controller and approval contracts.

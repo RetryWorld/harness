@@ -1,5 +1,7 @@
 #include "critic.hpp"
 #include "worker.hpp"
+#include "propositions.hpp"
+#include "critic_features.hpp"
 #include <cmath>
 #include <future>
 #include <iostream>
@@ -9,6 +11,52 @@ using namespace harness::tiny;
 using harness::observation::require;
 int main() {
   try {
+    harness::observation::CriticFeatureAccumulator feature_accumulator;
+    feature_accumulator.joint({0.1, -0.2}, {0.3, -0.4}, {0.5, -0.6});
+    feature_accumulator.action({0.2, -0.1});
+    const std::vector<std::uint8_t> pixels{255, 0, 0, 0, 255, 0};
+    feature_accumulator.image(pixels, 2, 1, 6, 3);
+    const auto feature_embedding = feature_accumulator.embedding(
+        harness::observation::critic_joint_state |
+        harness::observation::critic_action |
+        harness::observation::critic_camera);
+    double feature_norm = 0;
+    for (const auto value : feature_embedding)
+      feature_norm += static_cast<double>(value) * static_cast<double>(value);
+    require(std::abs(feature_norm - 1) < 1e-5 &&
+                feature_accumulator.roles() == 7,
+            "role feature encoder emits a normalized deterministic embedding");
+    const auto joint_only = feature_accumulator.embedding(
+        harness::observation::critic_joint_state);
+    require(joint_only[24] == 0 && joint_only[56] == 0,
+            "proposition role mask excludes unrequested modalities");
+    PropositionEmbedding embedding{};
+    embedding[0] = 1;
+    PropositionHead head;
+    head.centers[0] = embedding;
+    head.center_count = 1;
+    head.required_hz = 200;
+    head.max_input_age_ns = 10000000;
+    head.required_modalities = 1;
+    auto empty = head;
+    empty.center_count = 0;
+    PropositionBank bank({head, head, empty}, 200);
+    std::array<PropositionScore, 3> scores;
+    std::array<std::int64_t, 32> times{};
+    require(bank.evaluate(embedding, 0, 0, 0, times, scores), "bank output dimensions");
+    require(scores[0].similarity == 1 && scores[1].similarity == 1 &&
+            scores[2].state == PropositionState::unknown,
+            "independent overlapping propositions and empty guard abstention");
+    bank.evaluate(embedding, 0, 6000000, 0, times, scores);
+    require(scores[0].state == PropositionState::deadline_missed, "MUST rate gap is explicit");
+    bank.evaluate(embedding, 0, 11000000, 0, times, scores);
+    require(scores[0].state == PropositionState::insufficient_evidence, "stale modality abstains");
+    bank.evaluate(embedding, 0, 0, 1, times, scores);
+    require(scores[0].state == PropositionState::score, "epoch reset clears deadlines");
+    bool rate_rejected = false;
+    try { PropositionBank too_slow({head}, 100); }
+    catch (const std::exception &) { rate_rejected = true; }
+    require(rate_rejected, "unsatisfied MUST frequency rejected");
     Spec s = Spec::parse({{"steps",16},{"cameras",2},{"joints",32},
                          {"min_steps",4},{"sample_hz",2},{"max_age_s",0.75}});
     require(Frame(s).vision.size() == 2560, "frame storage dimensions");

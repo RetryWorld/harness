@@ -10,7 +10,7 @@
 #   ./scripts/build_artifact.sh 0.1.0
 #
 # Outputs to dist/:
-#   harness-kernel-<ver>-<target>.tar.gz   bin/ lib/ include/harness/ share/proto/
+#   harness-kernel-<ver>-<target>.tar.gz   bin/ lib/ include/harness/ share/{harness,proto}/
 #   release-manifest-<target>.json          version, commit, compiler, ABI, sha256
 #
 # schemas/ is a required build input as of the v2 (schema-driven) kernel —

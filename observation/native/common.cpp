@@ -142,6 +142,18 @@ Json read_json(const fs::path &path) {
   return Json::parse(stream);
 }
 namespace {
+fs::path installed_prefix() {
+#if defined(__linux__)
+  std::array<char, 4096> executable{};
+  const auto size =
+      ::readlink("/proc/self/exe", executable.data(), executable.size() - 1);
+  if (size > 0) {
+    executable[static_cast<std::size_t>(size)] = '\0';
+    return fs::path(executable.data()).parent_path().parent_path();
+  }
+#endif
+  return {};
+}
 fs::path observation_config_path(const fs::path &requested) {
   if (fs::is_regular_file(requested)) return requested;
   if (requested.has_parent_path()) return requested;
@@ -159,18 +171,10 @@ fs::path observation_config_path(const fs::path &requested) {
     const auto candidate = base / filename;
     if (fs::is_regular_file(candidate)) return candidate;
   }
-#if defined(__linux__)
-  std::array<char, 4096> executable{};
-  const auto size =
-      ::readlink("/proc/self/exe", executable.data(), executable.size() - 1);
-  if (size > 0) {
-    executable[static_cast<std::size_t>(size)] = '\0';
-    const auto prefix = fs::path(executable.data()).parent_path().parent_path();
-    const auto candidate =
-        prefix / "share" / "harness" / "observation" / filename;
-    if (fs::is_regular_file(candidate)) return candidate;
-  }
-#endif
+  const auto prefix = installed_prefix();
+  const auto candidate =
+      prefix / "share" / "harness" / "observation" / filename;
+  if (!prefix.empty() && fs::is_regular_file(candidate)) return candidate;
   return requested;
 }
 } // namespace

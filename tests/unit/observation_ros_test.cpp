@@ -1,6 +1,8 @@
 // Real rosbag2/MCAP round trip, plus an opt-in DDS observer smoke test.
 // The messages are synthetic test inputs, not a simulator or learned policy.
 #include "recording.hpp"
+#include "critic_features.hpp"
+#include <algorithm>
 #include "store.hpp"
 #include <csignal>
 #include <fstream>
@@ -41,15 +43,23 @@ void recording_test(const fs::path &root) {
         // zero.
         if (type == "sensor_msgs/msg/JointState") {
           sensor_msgs::msg::JointState m;
-          m.position = {static_cast<double>(epoch)};
+          m.name = config["joint_order"].get<std::vector<std::string>>();
+          m.position.assign(m.name.size(), static_cast<double>(epoch));
+          m.velocity.assign(m.name.size(), 0.1 * static_cast<double>(epoch));
+          m.effort.assign(m.name.size(), 0.2 * static_cast<double>(epoch));
           recording.write(name, type, serialize(m), time, epoch);
         } else if (type == "sensor_msgs/msg/Image") {
           sensor_msgs::msg::Image m;
-          m.data = {static_cast<std::uint8_t>(epoch)};
+          m.width = 1;
+          m.height = 1;
+          m.step = 3;
+          m.encoding = "rgb8";
+          m.data = {static_cast<std::uint8_t>(epoch ? 255 : 0), 0, 0};
           recording.write(name, type, serialize(m), time, epoch);
         } else {
           std_msgs::msg::Float64MultiArray m;
-          m.data = {static_cast<double>(epoch)};
+          m.data.assign(config["joint_order"].size(),
+                        static_cast<double>(epoch));
           recording.write(name, type, serialize(m), time, epoch);
         }
       }
@@ -70,12 +80,81 @@ void recording_test(const fs::path &root) {
       sensor_msgs::msg::JointState joint;
       rclcpp::Serialization<sensor_msgs::msg::JointState> codec;
       codec.deserialize_message(&bytes, &joint);
-      require(joint.position == std::vector<double>{1.0},
+      require(!joint.position.empty() && joint.position.front() == 1.0,
               "export mixed clock epochs");
     }
     ++count;
   }
   require(count == 8, "export message count mismatch");
+
+  const Json window = {{"id", "ros-compiled-window"},
+                       {"status", "ready"}, {"epoch", 1},
+                       {"start_ns", 1}, {"mark_ns", 2}, {"end_ns", 2}};
+  const auto embedded = compile_snapshot_embedding(
+      path, config, window,
+      critic_joint_state | critic_action | critic_camera);
+  require(embedded["status"] == "ready" &&
+              embedded["vector"].size() == critic_embedding_dimensions,
+          "exported MCAP did not produce a critic embedding");
+
+  auto store = Store::create(root / "compiled-store", HARNESS_OBSERVATION_CONFIG);
+  auto apply = [&](const std::string &operation, Json payload) {
+    return store.apply({{"schema_version", 1},
+                        {"request_id", operation + "-" + unique_id()},
+                        {"actor", "ros-integration-test"},
+                        {"expected_revision", store.snapshot()["revision"]},
+                        {"operation", operation}, {"payload", std::move(payload)}});
+  };
+  apply("set_critic_context",
+        {{"context", {{"schema_version", 1}, {"task", "fixture"},
+                       {"embodiment", {{"class_id", "so101"},
+                                        {"joint_names", config["joint_order"]}}}}}});
+  apply("add_proposition",
+        {{"proposition_id", "fixture_failure"},
+         {"description", "fixture failure"},
+         {"scope", {{"required_hz", 200}, {"max_input_age_ms", 100},
+                     {"required_roles", {"joint_state", "action", "camera"}}}}});
+  Json coverage = Json::object();
+  for (const auto &topic : config["topics"])
+    coverage[topic["name"].get<std::string>()] = {{"valid_count", 2}};
+  auto candidate_window = window;
+  candidate_window["coverage"] = coverage;
+  const auto candidate = apply(
+      "candidate", {{"window", candidate_window},
+                    {"session_id", "ros-compile-session"},
+                    {"binding_hash", digest(config)},
+                    {"detection", {{"detector_id", "operator"},
+                                   {"evidence_class", "fixture_failure"},
+                                   {"source", "operator"}, {"confidence", 1.0}}}});
+  const auto artifact = store.import_artifact(path, "evidence_mcap");
+  apply("attach_evidence",
+        {{"candidate_id", candidate["id"]}, {"artifact", artifact}});
+  apply("accept_failure",
+        {{"candidate_id", candidate["id"]}, {"description", "fixture"},
+         {"guidance", "hold"}, {"proposition_id", "fixture_failure"}});
+  const auto compiled = store.snapshot();
+  require(compiled["critic_runtime_status"] == "ready_shadow" &&
+              compiled["enforcement_status"] == "shadow" &&
+              compiled["critic_deployment"]["executable"] == true &&
+              compiled["critic_deployment"]["heads"][0]["centers"].size() == 1 &&
+              std::find(compiled["placeholders"].begin(),
+                        compiled["placeholders"].end(),
+                        Json("critic_inference")) == compiled["placeholders"].end(),
+          "accepted MCAP did not atomically produce an executable bank");
+  apply("add_proposition",
+        {{"proposition_id", "new_unseen_failure"},
+         {"description", "new unseen failure"},
+         {"scope", {{"required_hz", 50}, {"max_input_age_ms", 100},
+                     {"required_roles", {"joint_state", "action"}}}}});
+  const auto invalidated = store.snapshot();
+  require(invalidated["critic_runtime_status"] == "awaiting_examples" &&
+              invalidated["critic_deployment"]["executable"] == false &&
+              std::find(invalidated["placeholders"].begin(),
+                        invalidated["placeholders"].end(),
+                        Json("critic_inference")) != invalidated["placeholders"].end() &&
+              invalidated["critic_compilation"]["generation"].get<int>() ==
+                  compiled["critic_compilation"]["generation"].get<int>() + 1,
+          "a new proposition did not invalidate and rebuild the active bank");
 }
 struct Child {
   pid_t pid = -1;
