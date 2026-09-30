@@ -729,8 +729,8 @@ Json compile_snapshot_embedding(const fs::path &artifact, const Json &binding,
   const auto end = window.contains("mark_ns")
                        ? window["mark_ns"].get<Ns>()
                        : window.at("end_ns").get<Ns>();
-  const auto begin =
-      std::max(window.at("start_ns").get<Ns>(), end - 1000000000LL);
+  const auto begin = std::max<Ns>(window.at("start_ns").get<Ns>(),
+                                  end - Ns{1000000000});
   rosbag2_cpp::Reader reader;
   rosbag2_storage::StorageOptions storage;
   storage.uri = artifact.string();
@@ -749,7 +749,8 @@ Json compile_snapshot_embedding(const fs::path &artifact, const Json &binding,
     const auto &topic = topics.at(message->topic_name);
     const auto role = topic.value("role", "");
     if ((required_roles & critic_role_bit(role)) == 0) continue;
-    require(types.at(message->topic_name) == topic.at("type"),
+    require(types.at(message->topic_name) ==
+                topic.at("type").get<std::string>(),
             "accepted MCAP schema differs from profile binding");
     const auto &raw = *message->serialized_data;
     require(raw.buffer_length <= 64 * 1024 * 1024,
@@ -774,11 +775,13 @@ Json compile_snapshot_embedding(const fs::path &artifact, const Json &binding,
   const auto vector = features.embedding(required_roles);
   Json values = Json::array();
   for (const auto value : vector) values.push_back(value);
-  return {{"status", "ready"},
-          {"encoder", critic_feature_encoder},
-          {"roles_mask", features.roles()},
-          {"window", {{"start_ns", begin}, {"end_ns", end}}},
-          {"vector", std::move(values)}};
+  Json result = Json::object();
+  result["status"] = "ready";
+  result["encoder"] = critic_feature_encoder;
+  result["roles_mask"] = features.roles();
+  result["window"] = Json{{"start_ns", begin}, {"end_ns", end}};
+  result["vector"] = std::move(values);
+  return result;
 }
 bool snapshot_compiler_available() { return true; }
 

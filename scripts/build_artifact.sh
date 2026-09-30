@@ -21,6 +21,14 @@ cd "$(dirname "$0")/.."
 
 VERSION="${1:?usage: build_artifact.sh <version>}"
 WITH_ROS2="${HARNESS_WITH_ROS2:-OFF}"
+PROJECT_VERSION="$(awk '
+  /project\(harness_kernel/ { in_project = 1 }
+  in_project && /VERSION/ { print $2; exit }
+' CMakeLists.txt)"
+if [ "$VERSION" != "$PROJECT_VERSION" ]; then
+  echo "ERROR: requested artifact version $VERSION != CMake project version $PROJECT_VERSION" >&2
+  exit 1
+fi
 # Must match install.sh's TARGET computation exactly (see the comment there) —
 # any drift here is a manifest/tarball 404 on install.
 if [ -z "${TARGET:-}" ]; then
