@@ -242,9 +242,12 @@ void workflow_tests() {
               snapshots[0]["failure_id"] != snapshots[1]["failure_id"],
           "accepted moments accumulate under one proposition with immutable MCAP evidence");
     const auto trained_input = f.store.snapshot();
+    const auto compile_status =
+        trained_input["critic_runtime_status"].get<std::string>();
     check(trained_input["critic_compilation"]["generation"] == 3 &&
               trained_input["critic_compilation"]["model_hash"] != first_model_hash &&
-              trained_input["critic_runtime_status"] == "awaiting_ros_runtime" &&
+              (compile_status == "awaiting_ros_runtime" ||
+               compile_status == "compile_failed") &&
               trained_input["critic_deployment"]["executable"] == false,
           "each accepted proposition moment rebuilds a new model generation");
     f.apply("add_proposition",

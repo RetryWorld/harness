@@ -103,7 +103,8 @@ void recording_test(const fs::path &root) {
                         {"request_id", operation + "-" + unique_id()},
                         {"actor", "ros-integration-test"},
                         {"expected_revision", store.snapshot()["revision"]},
-                        {"operation", operation}, {"payload", std::move(payload)}});
+                        {"operation", operation}, {"payload", std::move(payload)}})
+        ["result"];
   };
   apply("set_critic_context",
         {{"context", {{"schema_version", 1}, {"task", "fixture"},
